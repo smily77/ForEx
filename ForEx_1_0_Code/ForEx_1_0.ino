@@ -1,3 +1,4 @@
+//BugFix delay - after analogRead
 #include <TimeLib.h> 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
@@ -264,6 +265,7 @@ void loop(){
      
 #if defined(LDR)  
   helligkeit = analogRead(A0);
+  delay(100);
   if (helligkeit > 1010) helligkeit = 1010;
   analogWrite(ledPin,helligkeit);
 #endif
