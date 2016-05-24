@@ -1,3 +1,4 @@
+//Watchdog
 //BugFix delay - after analogRead
 #include <TimeLib.h> 
 #include <ESP8266WiFi.h>
@@ -6,6 +7,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h> 
 #include <TextFinder.h>
+#include <Ticker.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold18pt7b.h>
 extern "C" {
@@ -66,6 +68,33 @@ int wPeriode;
 char buf[40];
 int h1,h2;
 boolean webInp = false;
+
+Ticker secondTick;
+
+volatile int watchDogCount = 0;
+
+void ISRwatchDog() {
+  watchDogCount++;
+  if (watchDogCount >= 60) {
+    watchDogAction();
+  }
+}
+
+void watchDogFeed() {
+  watchDogCount = 0;
+  delay(1);
+}
+
+void watchDogAction() {
+  secondTick.detach();
+  clearTFTScreen();
+  tft.setTextColor( ST7735_RED );
+  tft.setTextSize(2);
+  tft.println("WATCHDOG");
+  tft.println("ATTACK");
+  delay(10000);
+  ESP.reset();
+}
 
 void setup() {
   location[0] = "Herisau,ch"; //Origin
@@ -269,6 +298,6 @@ void loop(){
   if (helligkeit > 1010) helligkeit = 1010;
   analogWrite(ledPin,helligkeit);
 #endif
-
+  watchDogFeed();
 }
 

@@ -3,6 +3,13 @@ void printHelligkeit() {
   tft.println(anzeige);
 }
 
+void clearTFTScreen() {
+  tft.fillScreen( ST7735_BLACK );
+  tft.setTextColor( ST7735_WHITE );
+  tft.setFont();
+  tft.setCursor( 0, 0 );
+}
+
 void displayMainScreen() {
     int timeLine = 13; 
   int minAbstand = 5;
