@@ -18,7 +18,15 @@ void catchTimes() {
 long getUTCbasedonLocation(String place) {
 
   while (!catchWeatherInfo(place, temp, humidity, icon, iconSub, lat, lon));
+  if (DEBUG) {
+    Serial.println();
+    Serial.println("Got weather info");
+  }
   while (!catchTZInfo(lon, lat, utc));
+  if (DEBUG) {
+    Serial.println();
+    Serial.println("TZInfo");
+  }
 
   return int(utc*3600);
 }
@@ -27,6 +35,7 @@ boolean catchWeatherInfo(String city, byte &temp, byte &humidity, byte &icon, ch
   boolean ok = false;
   
   if (!client.connect("api.openweathermap.org", 80)) {
+    if (DEBUG) Serial.println("connection failed");
     return false;
   }
 
@@ -74,8 +83,10 @@ boolean catchWeatherInfo(String city, byte &temp, byte &humidity, byte &icon, ch
     
     while(client.available()){
       int c = int(client.read());
+      if (DEBUG) Serial.print(char(c));
     }
   }
+  if (DEBUG) Serial.println();
   client.stop();
   client.flush();
   return ok;
@@ -84,32 +95,46 @@ boolean catchWeatherInfo(String city, byte &temp, byte &humidity, byte &icon, ch
 boolean catchTZInfo(float lon, float lat, float &utc) {
   boolean ok = false;
   
-  if (!client.connect("api.worldweatheronline.com", 80)) {
+  if (!client.connect("api.timezonedb.com", 80)) {
+    if (DEBUG) Serial.println("connection failed");
     return false;
   }
-  
-  String url = "/free/v2/tz.ashx?key="; 
+//http://api.timezonedb.com/v2/get-time-zone?key=P9YQT3PQ42TB&format=xml&by=position&lat=13.74&lng=-89.21
+  //String url = "/v2/get-time-zone?key=P9YQT3PQ42TB&format=xml&by=position&lat="; 
+  String url = "/v2/get-time-zone?key="; 
   url += TZapi;
-  url += "&q=";
+  url += "&format=xml&by=position&lat=";
   url += lat;
-  url += ",";
+  url += "&lng=";
   url += lon;
-  url += "&format=xml";
 
+  if (DEBUG) {
+    Serial.println();
+    Serial.println(url);
+  }
   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: " + "api.worldweatheronline.com" + "\r\n" + 
+               "Host: " + "api.timezonedb.com" + "\r\n" + 
                "Connection: close\r\n\r\n");
-  
+   if (DEBUG) Serial.println("Sent TZ request");
    if (client.connected()) {
+    while(!client.available());
     ok = true;
-    finder.find("<utcOffset>");
-    utc = finder.getFloat();
+    if (DEBUG) Serial.println("Got TZ connected");
+    finder.find("<gmtOffset>");
+    utc = finder.getValue();
+    utc = utc / 3600;
+    Serial.println();
+    Serial.print(utc);
+    Serial.println();
     while(client.available()){
       int c = int(client.read());
+      if (DEBUG) Serial.print(char(c));
     }
   }
+  if (DEBUG) Serial.println();
   client.stop();
   client.flush();
+  delay(1000);
   return ok;
 }
 
@@ -117,6 +142,7 @@ float catchCurrency(String baseCurrency, String currency) {
  // http://api.fixer.io/latest?base=USD;symbols=CHF
   float wert = 0;
   if (!client.connect("api.fixer.io", 80)) {
+    if (DEBUG) Serial.println("connection failed");
     return wert;
   }
   
@@ -135,6 +161,7 @@ float catchCurrency(String baseCurrency, String currency) {
     wert = finder.getFloat();
     while(client.available()){
       int c = int(client.read());
+      if (DEBUG) Serial.print(char(c));
     }
   }
    client.stop();
