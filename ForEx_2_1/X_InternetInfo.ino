@@ -1,5 +1,10 @@
 // X_InternetInfo.ino – ForEx_2_1
 // Wechselkurse per LTE-Modul BK-7670 abrufen.
+// Forward-Deklarationen nötig, da Arduino .ino-Dateien alphabetisch
+// zusammengeführt werden und X_ vor x_subroutines kommt.
+String sendAT(const String& cmd, int timeout = 1000);
+String sendATwait(const String& cmd, const String& waitFor, int timeout = 5000);
+
 // Verwendet den eingebauten HTTP-Stack des Moduls (AT+HTTPINIT / HTTPACTION).
 // Die AT-Befehlssyntax folgt dem 3GPP-Standard / SIMCom-kompatiblem Befehlssatz.
 // Falls der BK-7670 einen anderen HTTP-Befehlssatz verwendet, bitte Datenblatt
