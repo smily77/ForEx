@@ -29,6 +29,17 @@ void catchCurrencies() {
   String resp;
   String body = "";
 
+  // --- Bearer-Profil (SAPBR) konfigurieren ---
+  // Viele Module (SIM800-kompatibel) benötigen ein offenes Bearer-Profil
+  // bevor AT+HTTPINIT / AT+HTTPPARA="CID" funktioniert.
+  sendAT("AT+SAPBR=0,1", 2000);                                          // evtl. offenen Bearer schliessen
+  delay(500);
+  sendAT("AT+SAPBR=3,1,\"Contype\",\"GPRS\"", 1000);                    // Verbindungstyp: GPRS
+  sendAT(String("AT+SAPBR=3,1,\"APN\",\"") + LTE_APN + "\"", 1000);    // APN setzen
+  resp = sendAT("AT+SAPBR=1,1", 8000);                                   // Bearer öffnen
+  if (DEBUG) Serial.println("SAPBR open: " + resp);
+  delay(2000);
+
   // --- HTTP-Stack initialisieren ---
   // Zuerst evtl. offene Session beenden
   sendAT("AT+HTTPTERM", 1000);
@@ -41,11 +52,13 @@ void catchCurrencies() {
     tft.println("HTTP Init fehl");
     tft.setTextColor(ST7735_WHITE);
     sendAT("AT+HTTPTERM", 1000);
+    sendAT("AT+SAPBR=0,1", 2000);
     return;
   }
 
-  // PDP-Kontext dem HTTP-Stack zuweisen
-  sendAT("AT+HTTPPARA=\"CID\",1", 1000);
+  // Bearer-ID dem HTTP-Stack zuweisen (nach SAPBR=1,1 muss das klappen)
+  resp = sendAT("AT+HTTPPARA=\"CID\",1", 1000);
+  if (DEBUG && resp.indexOf("OK") == -1) Serial.println("CID Warnung: " + resp);
 
   // URL setzen (HTTP, kein SSL nötig – öffentliche API)
   String urlCmd = String("AT+HTTPPARA=\"URL\",\"http://")
@@ -80,6 +93,7 @@ void catchCurrencies() {
     tft.println("HTTP Fehler");
     tft.setTextColor(ST7735_WHITE);
     sendAT("AT+HTTPTERM", 1000);
+    sendAT("AT+SAPBR=0,1", 2000);
     return;
   }
 
@@ -103,8 +117,9 @@ void catchCurrencies() {
     Serial.println(body);
   }
 
-  // HTTP-Stack beenden
+  // HTTP-Stack und Bearer beenden
   sendAT("AT+HTTPTERM", 1000);
+  sendAT("AT+SAPBR=0,1", 2000);
 
   if (body.length() < 10) {
     if (DEBUG) Serial.println("Leere Antwort – Abbruch");
