@@ -40,7 +40,7 @@ const char* AIRPORT_CODES[7] = {
 //   0 = M-Budget Mobile  (MVNO auf Swisscom-Netz)
 //   1 = Digital Republic (MVNO auf Salt-Netz)
 // ============================================================
-#define ACTIVE_PROVIDER  0          // <-- HIER PROVIDER EINSTELLEN
+#define ACTIVE_PROVIDER  1          // <-- HIER PROVIDER EINSTELLEN
 
 #if ACTIVE_PROVIDER == 0
   // M-Budget Mobile – läuft auf dem Swisscom-Netz
@@ -247,11 +247,12 @@ void loop() {
     displayMainScreen();
   }
 
-  // Helligkeit über Potentiometer / LDR an A0 anpassen
-  helligkeit = analogRead(A0);
-  delay(100);
-  if (helligkeit > 1010) helligkeit = 1010;
-  analogWrite(ledPin, helligkeit);
+  // Helligkeit über Potentiometer / LDR an A0 anpassen (im Debug-Modus deaktiviert)
+  if (!DEBUG) {
+    helligkeit = analogRead(A0);
+    if (helligkeit > 1010) helligkeit = 1010;
+    analogWrite(ledPin, helligkeit);
+  }
 
   watchDogFeed();
 }
