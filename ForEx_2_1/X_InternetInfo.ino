@@ -10,7 +10,7 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Falls der BK-7670 einen anderen HTTP-Befehlssatz verwendet, bitte Datenblatt
 // konsultieren und die Befehle unten entsprechend anpassen.
 
-// API: http://api.frankfurter.app/latest?base=EUR&symbols=CHF,USD,GBP
+// API: https://api.frankfurter.app/latest?base=EUR&symbols=CHF,USD,GBP
 // Antwort-Beispiel:
 //   {"amount":1.0,"base":"EUR","date":"2025-03-05",
 //    "rates":{"CHF":0.9560,"GBP":0.8575,"USD":1.0853}}
@@ -21,10 +21,16 @@ void catchCurrencies() {
 
   if (DEBUG) {
     Serial.println("=== catchCurrencies ===");
-    Serial.print("URL: http://");
+    Serial.print("URL: https://");
     Serial.print(httpHost);
     Serial.println(httpPath);
   }
+
+  // Eigenen 60s-Watchdog während HTTP pausieren – die gesamte HTTP-Sequenz
+  // (HTTPINIT + SSL + GET + HTTPREAD) kann 30-50 s dauern.
+  secondTick.detach();
+  watchDogCount     = 0;
+  watchDogTriggered = false;
 
   String resp;
   String body = "";
@@ -42,37 +48,43 @@ void catchCurrencies() {
     tft.println("HTTP Init fehl");
     tft.setTextColor(ST7735_WHITE);
     sendAT("AT+HTTPTERM", 1000);
+    secondTick.attach(1, ISRwatchDog);
     return;
   }
 
+  // SSL aktivieren (API redirectet HTTP → HTTPS)
+  sendAT("AT+HTTPSSL=1", 1000);
+
   // URL setzen – char-Buffer statt String-Verkettung (verhindert Heap-Fragmentierung)
   char urlCmd[128];
-  snprintf(urlCmd, sizeof(urlCmd), "AT+HTTPPARA=\"URL\",\"http://%s%s\"", httpHost, httpPath);
+  snprintf(urlCmd, sizeof(urlCmd), "AT+HTTPPARA=\"URL\",\"https://%s%s\"", httpHost, httpPath);
   resp = sendAT(String(urlCmd), 2000);
   if (DEBUG && resp.indexOf("OK") == -1) Serial.println("URL-Param fehlgeschlagen: " + resp);
 
-  // GET-Request senden (0 = GET)
-  resp = sendATwait("AT+HTTPACTION=0", "+HTTPACTION:", 15000);
+  // GET-Request senden (0 = GET) – SSL-Handshake kann länger dauern
+  resp = sendATwait("AT+HTTPACTION=0", "+HTTPACTION:", 20000);
 
   // Auf +HTTPACTION: 0,200,<len> warten (Antwort kommt asynchron)
   long tWait = millis();
-  while (millis() - tWait < 15000) {
+  while (millis() - tWait < 20000) {
     while (lteSerial.available()) {
       resp += (char)lteSerial.read();
     }
     if (resp.indexOf("+HTTPACTION:") != -1) break;
     delay(200);
+    yield();
   }
 
   if (DEBUG) Serial.println("HTTPACTION Response: " + resp);
 
   // HTTP-Statuscode prüfen (200 = OK)
   if (resp.indexOf(",200,") == -1) {
-    if (DEBUG) Serial.println("HTTP-Fehler (kein 200)");
+    if (DEBUG) Serial.println("HTTP-Fehler (kein 200): " + resp);
     tft.setTextColor(ST7735_YELLOW);
     tft.println("HTTP Fehler");
     tft.setTextColor(ST7735_WHITE);
     sendAT("AT+HTTPTERM", 1000);
+    secondTick.attach(1, ISRwatchDog);
     return;
   }
 
@@ -96,8 +108,9 @@ void catchCurrencies() {
     Serial.println(body);
   }
 
-  // HTTP-Stack beenden
+  // HTTP-Stack beenden und eigenen Watchdog wieder aktivieren
   sendAT("AT+HTTPTERM", 1000);
+  secondTick.attach(1, ISRwatchDog);
 
   if (body.length() < 10) {
     if (DEBUG) Serial.println("Leere Antwort – Abbruch");

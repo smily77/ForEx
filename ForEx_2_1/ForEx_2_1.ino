@@ -105,19 +105,24 @@ boolean firstRun = true;
 
 // ============================================================
 // WATCHDOG (60-Sekunden-Timeout → ESP-Reset)
+// WICHTIG: Ticker-ISR darf keine blockierenden Operationen
+// ausführen (delay, TFT, Serial). Nur Flag setzen, Aktion
+// im Haupt-Loop ausführen.
 // ============================================================
 Ticker secondTick;
-volatile int watchDogCount = 0;
+volatile int  watchDogCount     = 0;
+volatile bool watchDogTriggered = false;
 
 void ISRwatchDog() {
   watchDogCount++;
   if (watchDogCount >= 60) {
-    watchDogAction();
+    watchDogTriggered = true;   // Nur Flag setzen – kein Blocking im ISR!
   }
 }
 
 void watchDogFeed() {
-  watchDogCount = 0;
+  watchDogCount     = 0;
+  watchDogTriggered = false;
   delay(1);
 }
 
@@ -217,6 +222,11 @@ void setup() {
 // HAUPTSCHLEIFE
 // ============================================================
 void loop() {
+  // Watchdog-Aktion im Haupt-Kontext ausführen (nie im ISR!)
+  if (watchDogTriggered) {
+    watchDogAction();
+  }
+
   if (minuteLast != minute()) {
     minuteLast = minute();
 
