@@ -10,15 +10,18 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Falls der BK-7670 einen anderen HTTP-Befehlssatz verwendet, bitte Datenblatt
 // konsultieren und die Befehle unten entsprechend anpassen.
 
-// API: https://api.vatcomply.com/rates?base=EUR&symbols=CHF,USD,GBP
-// Kein Cloudflare-CDN → LTE-Module werden nicht mit 403 geblockt.
-// Antwort-Beispiel:
-//   {"base":"EUR","date":"2025-03-05",
-//    "rates":{"CHF":0.9560,"GBP":0.8575,"USD":1.0853}}
+// API: https://api.exchangerate-api.com/v4/latest/EUR
+// Fastly CDN (nicht Cloudflare) → breite TLS-Kompatibilität, kein Bot-Blocking.
+// Freier Endpunkt, kein API-Key nötig.
+// Response enthält alle ~160 Währungen alphabetisch. USD erscheint erst bei
+// ~1700 Bytes → httpLen auf 2500 gesetzt.
+// Antwort-Beispiel (gekürzt):
+//   {"base":"EUR","date":"2025-03-05","time_last_updated":...,"rates":{
+//    ...,"CHF":0.9560,...,"GBP":0.8575,...,"USD":1.0853,...}}
 
 void catchCurrencies() {
-  const char* httpHost = "api.vatcomply.com";
-  const char* httpPath = "/rates?base=EUR&symbols=CHF,USD,GBP";
+  const char* httpHost = "api.exchangerate-api.com";
+  const char* httpPath = "/v4/latest/EUR";
 
   if (DEBUG) {
     Serial.println("=== catchCurrencies ===");
@@ -145,7 +148,9 @@ void catchCurrencies() {
     lenStr.trim();
     httpLen = lenStr.toInt();
   }
-  if (httpLen <= 0 || httpLen > 1024) httpLen = 512; // Sicherheits-Fallback
+  // exchangerate-api.com liefert alle Währungen (~2500 Bytes bis USD).
+  // Fallback: wenn Server weniger meldet, das Gemeldete lesen; wenn mehr, auf 2500 kappen.
+  if (httpLen <= 0 || httpLen > 2500) httpLen = 2500;
 
   // Antwort-Body lesen – direkter Print, kein String-Objekt (Heap-Fragmentierung)
   {
@@ -155,6 +160,7 @@ void catchCurrencies() {
     lteSerial.println(httpLen);
     if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
     body = "";
+    body.reserve(httpLen + 20); // Heap vorab reservieren – verhindert viele Reallocations
     long t0 = millis();
     while (millis() - t0 < 8000) {
       while (lteSerial.available()) body += (char)lteSerial.read();
