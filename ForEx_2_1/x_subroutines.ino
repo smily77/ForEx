@@ -9,7 +9,8 @@
 // Sendet einen AT-Befehl und liest die Antwort innerhalb von
 // `timeout` Millisekunden. Gibt den kompletten Response-String zurück.
 String sendAT(const String& cmd, int timeout = 1000) {
-  while (lteSerial.available()) lteSerial.read();  // Puffer leeren
+  delay(30);                                           // Warte auf ausstehende Antwort-Bytes
+  while (lteSerial.available()) lteSerial.read();     // Puffer leeren
   lteSerial.println(cmd);
 
   String response = "";
@@ -32,6 +33,7 @@ String sendAT(const String& cmd, int timeout = 1000) {
 
 // Sendet AT-Befehl und wartet auf ein bestimmtes Schlüsselwort.
 String sendATwait(const String& cmd, const String& waitFor, int timeout = 5000) {
+  delay(30);
   while (lteSerial.available()) lteSerial.read();
   lteSerial.println(cmd);
 

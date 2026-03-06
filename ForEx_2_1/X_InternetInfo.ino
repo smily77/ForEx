@@ -52,14 +52,35 @@ void catchCurrencies() {
     return;
   }
 
-  // SSL aktivieren (API redirectet HTTP → HTTPS)
-  sendAT("AT+HTTPSSL=1", 1000);
+  // URL setzen – direkt in Teilen senden, kein String-Objekt (vermeidet Heap-Fragmentierung).
+  // Moderne LTE-Module erkennen https:// automatisch; AT+HTTPSSL=1 wird nicht benötigt.
+  {
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.print(F("AT+HTTPPARA=\"URL\",\"https://"));
+    lteSerial.print(httpHost);
+    lteSerial.print(httpPath);
+    lteSerial.println(F("\""));
 
-  // URL setzen – char-Buffer statt String-Verkettung (verhindert Heap-Fragmentierung)
-  char urlCmd[128];
-  snprintf(urlCmd, sizeof(urlCmd), "AT+HTTPPARA=\"URL\",\"https://%s%s\"", httpHost, httpPath);
-  resp = sendAT(String(urlCmd), 2000);
-  if (DEBUG && resp.indexOf("OK") == -1) Serial.println("URL-Param fehlgeschlagen: " + resp);
+    if (DEBUG) {
+      Serial.print(F(">> AT+HTTPPARA=\"URL\",\"https://"));
+      Serial.print(httpHost);
+      Serial.print(httpPath);
+      Serial.println(F("\""));
+    }
+
+    resp = "";
+    long t0 = millis();
+    while (millis() - t0 < 3000) {
+      while (lteSerial.available()) resp += (char)lteSerial.read();
+      if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) break;
+      yield();
+    }
+    if (DEBUG) { Serial.print(F("<< ")); Serial.println(resp); }
+    if (resp.indexOf("OK") == -1) {
+      if (DEBUG) Serial.println(F("URL-Param fehlgeschlagen"));
+    }
+  }
 
   // GET-Request senden (0 = GET) – SSL-Handshake kann länger dauern
   resp = sendATwait("AT+HTTPACTION=0", "+HTTPACTION:", 20000);
