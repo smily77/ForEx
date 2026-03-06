@@ -82,18 +82,27 @@ void catchCurrencies() {
     }
   }
 
-  // GET-Request senden (0 = GET) – SSL-Handshake kann länger dauern
-  resp = sendATwait("AT+HTTPACTION=0", "+HTTPACTION:", 20000);
+  // GET-Request senden (0 = GET).
+  // Das Modul antwortet zuerst mit "OK" (Befehl akzeptiert), danach asynchron
+  // mit "+HTTPACTION: 0,<status>,<len>\r\n". sendATwait bricht bei Teilempfang
+  // von "+HTTPACTION:" ab – daher warten wir explizit auf die komplette Zeile.
+  resp = sendAT("AT+HTTPACTION=0", 5000);
 
-  // Auf +HTTPACTION: 0,200,<len> warten (Antwort kommt asynchron)
-  long tWait = millis();
-  while (millis() - tWait < 20000) {
-    while (lteSerial.available()) {
-      resp += (char)lteSerial.read();
+  // Warten auf vollständige URC-Zeile: +HTTPACTION: 0,200,123\r\n
+  // Abbruch erst wenn BEIDE Kommas und ein Newline dahinter vorhanden sind.
+  {
+    long tWait = millis();
+    while (millis() - tWait < 30000) {
+      while (lteSerial.available()) resp += (char)lteSerial.read();
+      int hIdx = resp.indexOf("+HTTPACTION:");
+      if (hIdx != -1) {
+        int c1 = resp.indexOf(',', hIdx);
+        int c2 = (c1 != -1) ? resp.indexOf(',', c1 + 1) : -1;
+        if (c2 != -1 && resp.indexOf('\n', c2) != -1) break; // vollständige Zeile
+      }
+      delay(200);
+      yield();
     }
-    if (resp.indexOf("+HTTPACTION:") != -1) break;
-    delay(200);
-    yield();
   }
 
   if (DEBUG) Serial.println("HTTPACTION Response: " + resp);
