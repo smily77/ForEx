@@ -10,18 +10,18 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Falls der BK-7670 einen anderen HTTP-Befehlssatz verwendet, bitte Datenblatt
 // konsultieren und die Befehle unten entsprechend anpassen.
 
-// API: https://api.exchangerate-api.com/v4/latest/EUR
-// Fastly CDN (nicht Cloudflare) → breite TLS-Kompatibilität, kein Bot-Blocking.
-// Freier Endpunkt, kein API-Key nötig.
+// API: https://open.er-api.com/v6/latest/CHF
+// Kein API-Key nötig. LTS-Endpunkt (v6), Fastly CDN → breite TLS-Kompatibilität.
+// CHF als Basis → rates["USD"/"EUR"/"GBP"] = X pro 1 CHF → Kehrwert = CHF pro X.
 // Response enthält alle ~160 Währungen alphabetisch. USD erscheint erst bei
-// ~1700 Bytes → httpLen auf 2500 gesetzt.
+// ~2000 Bytes → httpLen auf 2500 gesetzt.
 // Antwort-Beispiel (gekürzt):
-//   {"base":"EUR","date":"2025-03-05","time_last_updated":...,"rates":{
-//    ...,"CHF":0.9560,...,"GBP":0.8575,...,"USD":1.0853,...}}
+//   {"result":"success","base_code":"CHF","rates":{
+//    "CHF":1,...,"EUR":1.0989,...,"GBP":1.1494,...,"USD":1.2821,...}}
 
 void catchCurrencies() {
-  const char* httpHost = "api.exchangerate-api.com";
-  const char* httpPath = "/v4/latest/EUR";
+  const char* httpHost = "open.er-api.com";
+  const char* httpPath = "/v6/latest/CHF";
 
   if (DEBUG) {
     Serial.println("=== catchCurrencies ===");
@@ -192,39 +192,36 @@ void catchCurrencies() {
   }
 
   // -------------------------------------------------------
-  // JSON parsen: "CHF":x.xxxx  "USD":x.xxxx  "GBP":x.xxxx
+  // JSON parsen: "CHF":1  "USD":x.xxxx  "EUR":x.xxxx  "GBP":x.xxxx
   // fxSym[0]="CHF", fxSym[1]="USD", fxSym[2]="EUR", fxSym[3]="GBP"
-  // API liefert CHF, USD, GBP relativ zu EUR (Basis).
-  // EUR selbst ist nicht in der Antwort → wird auf 1.0 gesetzt.
+  // API liefert alle Werte relativ zu CHF (Basis):
+  //   rates["USD"] = X USD pro 1 CHF → Kehrwert = CHF pro USD
   // -------------------------------------------------------
   for (int i = 0; i < 4; i++) {
-    if (fxSym[i] != "EUR") {
-      // Suche z.B. "CHF":0.9560 im Body
-      int keyPos = body.indexOf("\"" + fxSym[i] + "\":");
-      if (keyPos != -1) {
-        int valStart = keyPos + fxSym[i].length() + 3; // nach ":"
-        // Wert endet bei Komma, } oder "
-        int valEnd = body.indexOf(",", valStart);
-        int valEnd2 = body.indexOf("}", valStart);
-        if (valEnd == -1 || (valEnd2 != -1 && valEnd2 < valEnd)) valEnd = valEnd2;
-        if (valEnd == -1) valEnd = valStart + 10;
-        String valStr = body.substring(valStart, valEnd);
-        valStr.trim();
-        fxValue[i] = valStr.toFloat();
-      } else {
-        fxValue[i] = 0.0;
-      }
+    // Suche z.B. "USD":1.2821 im Body
+    int keyPos = body.indexOf("\"" + fxSym[i] + "\":");
+    if (keyPos != -1) {
+      int valStart = keyPos + fxSym[i].length() + 3; // nach ":"
+      // Wert endet bei Komma, } oder "
+      int valEnd = body.indexOf(",", valStart);
+      int valEnd2 = body.indexOf("}", valStart);
+      if (valEnd == -1 || (valEnd2 != -1 && valEnd2 < valEnd)) valEnd = valEnd2;
+      if (valEnd == -1) valEnd = valStart + 10;
+      String valStr = body.substring(valStart, valEnd);
+      valStr.trim();
+      fxValue[i] = valStr.toFloat();
     } else {
-      fxValue[i] = 1.0;   // EUR ist Basis → 1.0
+      fxValue[i] = 0.0;
     }
 
     if (DEBUG) {
-      Serial.print(fxSym[i]); Serial.print("/EUR raw: ");
+      Serial.print(fxSym[i]); Serial.print("/CHF raw: ");
       Serial.println(fxValue[i]);
     }
   }
 
-  // Umrechnung: CHF/Währung = CHF/EUR ÷ Währung/EUR
+  // Umrechnung: rates[X] = X pro CHF → Kehrwert = CHF pro X
+  // fxValue[0]=CHF=1.0 → fxValue[0]/fxValue[l] = 1.0/fxValue[l]
   // Ergebnis: wie viele CHF pro 1 USD/EUR/GBP
   for (int l = 1; l < 4; l++) {
     if (fxValue[l] > 0.0) {
