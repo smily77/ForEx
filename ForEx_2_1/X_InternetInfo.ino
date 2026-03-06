@@ -53,22 +53,24 @@ void catchCurrencies() {
     return;
   }
 
-  // URL setzen – direkt in Teilen senden, kein String-Objekt (vermeidet Heap-Fragmentierung).
-  // Moderne LTE-Module erkennen https:// automatisch; AT+HTTPSSL=1 wird nicht benötigt.
+  // URL setzen – vollständigen AT-Befehl in char[] bauen und als EINE println()-
+  // Übertragung senden. Während TX den SoftwareSerial-RX-Interrupt deaktivieren:
+  // Auf ESP8266 ist SoftwareSerial-TX nicht interrupt-sicher – der RX-ISR feuert
+  // zwischen TX-Bits und zerstört das Byte-Timing (Korruption ab ~Byte 76).
   {
+    // Buffer: "AT+HTTPPARA="URL","https://<host><path>"" + NUL ≤ 100 Bytes
+    char urlCmd[100];
+    snprintf(urlCmd, sizeof(urlCmd),
+             "AT+HTTPPARA=\"URL\",\"https://%s%s\"", httpHost, httpPath);
+
     delay(30);
     while (lteSerial.available()) lteSerial.read();
-    lteSerial.print(F("AT+HTTPPARA=\"URL\",\"https://"));
-    lteSerial.print(httpHost);
-    lteSerial.print(httpPath);
-    lteSerial.println(F("\""));
 
-    if (DEBUG) {
-      Serial.print(F(">> AT+HTTPPARA=\"URL\",\"https://"));
-      Serial.print(httpHost);
-      Serial.print(httpPath);
-      Serial.println(F("\""));
-    }
+    if (DEBUG) { Serial.print(F(">> ")); Serial.println(urlCmd); }
+
+    lteSerial.enableRx(false);   // RX-ISR aus → kein Interrupt-Jitter beim TX
+    lteSerial.println(urlCmd);
+    lteSerial.enableRx(true);    // RX-ISR wieder an, bereit für Modul-Antwort
 
     resp = "";
     long t0 = millis();
