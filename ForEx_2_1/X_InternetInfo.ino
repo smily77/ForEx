@@ -82,6 +82,23 @@ void catchCurrencies() {
     }
   }
 
+  // User-Agent setzen – viele Server (inkl. Cloudflare) lehnen Anfragen
+  // ohne User-Agent mit 403 ab. Direkter Print vermeidet String-Heap.
+  {
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(F("AT+HTTPPARA=\"USERDATA\",\"User-Agent: ForEx/2.1\\r\\n\""));
+    if (DEBUG) Serial.println(F(">> AT+HTTPPARA=\"USERDATA\",\"User-Agent: ForEx/2.1\\r\\n\""));
+    String uaResp = "";
+    long t0 = millis();
+    while (millis() - t0 < 1000) {
+      while (lteSerial.available()) uaResp += (char)lteSerial.read();
+      if (uaResp.indexOf("OK") != -1 || uaResp.indexOf("ERROR") != -1) break;
+      yield();
+    }
+    if (DEBUG) { Serial.print(F("<< ")); Serial.println(uaResp); }
+  }
+
   // GET-Request senden (0 = GET).
   // Das Modul antwortet zuerst mit "OK" (Befehl akzeptiert), danach asynchron
   // mit "+HTTPACTION: 0,<status>,<len>\r\n". sendATwait bricht bei Teilempfang
@@ -109,7 +126,22 @@ void catchCurrencies() {
 
   // HTTP-Statuscode prüfen (200 = OK)
   if (resp.indexOf(",200,") == -1) {
-    if (DEBUG) Serial.println("HTTP-Fehler (kein 200): " + resp);
+    if (DEBUG) {
+      Serial.println("HTTP-Fehler: " + resp);
+      // Antwort-Body lesen und ausgeben – zeigt was der Server zurückgibt
+      delay(30);
+      while (lteSerial.available()) lteSerial.read();
+      lteSerial.println(F("AT+HTTPREAD=0,200"));
+      Serial.println(F(">> AT+HTTPREAD=0,200"));
+      String errBody = "";
+      long t0 = millis();
+      while (millis() - t0 < 5000) {
+        while (lteSerial.available()) errBody += (char)lteSerial.read();
+        if (errBody.indexOf("OK\r") != -1 || errBody.indexOf("ERROR") != -1) break;
+        yield();
+      }
+      Serial.println("Fehler-Body: " + errBody);
+    }
     tft.setTextColor(ST7735_YELLOW);
     tft.println("HTTP Fehler");
     tft.setTextColor(ST7735_WHITE);
@@ -129,13 +161,21 @@ void catchCurrencies() {
   }
   if (httpLen <= 0 || httpLen > 1024) httpLen = 512; // Sicherheits-Fallback
 
-  // Antwort-Body lesen: AT+HTTPREAD=<startpos>,<len>
-  String readCmd = String("AT+HTTPREAD=0,") + String(httpLen);
-  body = sendAT(readCmd, 5000);
-
-  if (DEBUG) {
-    Serial.println("HTTP Body:");
-    Serial.println(body);
+  // Antwort-Body lesen – direkter Print, kein String-Objekt (Heap-Fragmentierung)
+  {
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.print(F("AT+HTTPREAD=0,"));
+    lteSerial.println(httpLen);
+    if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
+    body = "";
+    long t0 = millis();
+    while (millis() - t0 < 8000) {
+      while (lteSerial.available()) body += (char)lteSerial.read();
+      if (body.indexOf("OK\r") != -1 || body.indexOf("ERROR") != -1) break;
+      yield();
+    }
+    if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
   }
 
   // HTTP-Stack beenden und eigenen Watchdog wieder aktivieren
