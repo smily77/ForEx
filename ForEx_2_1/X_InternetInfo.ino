@@ -122,11 +122,17 @@ void catchCurrencies() {
       while (lteSerial.available()) lteSerial.read();
       lteSerial.println(F("AT+HTTPREAD=0,200"));
       Serial.println(F(">> AT+HTTPREAD=0,200"));
+      // Modul sendet zuerst "OK\r\n" (Befehlsbestätigung), danach erst
+      // "+HTTPREAD: <len>\r\n<Daten>OK\r\n". Erst nach dem +HTTPREAD-Header
+      // auf das finale OK warten, sonst wird die Bestätigung als Ende erkannt.
       String errBody = "";
       long t0 = millis();
+      int errReadAt = -1;
       while (millis() - t0 < 5000) {
         while (lteSerial.available()) errBody += (char)lteSerial.read();
-        if (errBody.indexOf("OK\r") != -1 || errBody.indexOf("ERROR") != -1) break;
+        if (errReadAt < 0) errReadAt = errBody.indexOf("+HTTPREAD:");
+        if (errReadAt >= 0 && errBody.indexOf("OK\r", errReadAt) != -1) break;
+        if (errBody.indexOf("ERROR") != -1) break;
         yield();
       }
       Serial.println("Fehler-Body: " + errBody);
@@ -160,11 +166,17 @@ void catchCurrencies() {
     lteSerial.println(httpLen);
     if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
     body = "";
-    body.reserve(httpLen + 20); // Heap vorab reservieren – verhindert viele Reallocations
+    body.reserve(httpLen + 50); // Heap vorab reservieren – verhindert viele Reallocations
     long t0 = millis();
-    while (millis() - t0 < 8000) {
+    // Modul sendet zuerst "OK\r\n" (Befehlsbestätigung), dann erst:
+    //   +HTTPREAD: <len>\r\n<JSON-Daten>OK\r\n
+    // Erst warten bis "+HTTPREAD:" gesehen, dann auf das finale "OK\r" danach.
+    int httpReadAt = -1;
+    while (millis() - t0 < 12000) {
       while (lteSerial.available()) body += (char)lteSerial.read();
-      if (body.indexOf("OK\r") != -1 || body.indexOf("ERROR") != -1) break;
+      if (httpReadAt < 0) httpReadAt = body.indexOf("+HTTPREAD:");
+      if (httpReadAt >= 0 && body.indexOf("OK\r", httpReadAt) != -1) break;
+      if (body.indexOf("ERROR") != -1) break;
       yield();
     }
     if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
