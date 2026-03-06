@@ -10,14 +10,15 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Falls der BK-7670 einen anderen HTTP-Befehlssatz verwendet, bitte Datenblatt
 // konsultieren und die Befehle unten entsprechend anpassen.
 
-// API: https://api.frankfurter.app/latest?base=EUR&symbols=CHF,USD,GBP
+// API: https://api.vatcomply.com/rates?base=EUR&symbols=CHF,USD,GBP
+// Kein Cloudflare-CDN → LTE-Module werden nicht mit 403 geblockt.
 // Antwort-Beispiel:
-//   {"amount":1.0,"base":"EUR","date":"2025-03-05",
+//   {"base":"EUR","date":"2025-03-05",
 //    "rates":{"CHF":0.9560,"GBP":0.8575,"USD":1.0853}}
 
 void catchCurrencies() {
-  const char* httpHost = "api.frankfurter.app";
-  const char* httpPath = "/latest?base=EUR&symbols=CHF,USD,GBP";
+  const char* httpHost = "api.vatcomply.com";
+  const char* httpPath = "/rates?base=EUR&symbols=CHF,USD,GBP";
 
   if (DEBUG) {
     Serial.println("=== catchCurrencies ===");
@@ -80,23 +81,6 @@ void catchCurrencies() {
     if (resp.indexOf("OK") == -1) {
       if (DEBUG) Serial.println(F("URL-Param fehlgeschlagen"));
     }
-  }
-
-  // User-Agent setzen – viele Server (inkl. Cloudflare) lehnen Anfragen
-  // ohne User-Agent mit 403 ab. Direkter Print vermeidet String-Heap.
-  {
-    delay(30);
-    while (lteSerial.available()) lteSerial.read();
-    lteSerial.println(F("AT+HTTPPARA=\"USERDATA\",\"User-Agent: ForEx/2.1\\r\\n\""));
-    if (DEBUG) Serial.println(F(">> AT+HTTPPARA=\"USERDATA\",\"User-Agent: ForEx/2.1\\r\\n\""));
-    String uaResp = "";
-    long t0 = millis();
-    while (millis() - t0 < 1000) {
-      while (lteSerial.available()) uaResp += (char)lteSerial.read();
-      if (uaResp.indexOf("OK") != -1 || uaResp.indexOf("ERROR") != -1) break;
-      yield();
-    }
-    if (DEBUG) { Serial.print(F("<< ")); Serial.println(uaResp); }
   }
 
   // GET-Request senden (0 = GET).
