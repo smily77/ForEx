@@ -77,15 +77,33 @@ bool initLTE() {
   sendAT("ATE0", 500);          // Echo ausschalten
   sendAT("AT+CMEE=2", 500);     // Detaillierte Fehlermeldungen
 
-  // SIM-Karte prüfen
+  // SIM-Karte prüfen / PIN eingeben (nur Provider 0)
   resp = sendAT("AT+CPIN?", 2000);
   if (resp.indexOf("READY") == -1) {
-    if (DEBUG) Serial.println("FEHLER: SIM nicht bereit");
-    tft.setTextColor(ST7735_RED);
-    tft.println("SIM nicht bereit!");
-    tft.setTextColor(ST7735_WHITE);
-    // Nicht hart abbrechen – Modul evtl. noch im Hochlauf
-    delay(3000);
+#if ACTIVE_PROVIDER == 0
+    if (resp.indexOf("SIM PIN") != -1 && strlen(GPSII_PIN) > 0) {
+      tft.println("SIM PIN...");
+      if (DEBUG) Serial.println("SIM PIN eingeben...");
+      String pinCmd = String(F("AT+CPIN=\"")) + GPSII_PIN + "\"";
+      String pinResp = sendAT(pinCmd, 5000);
+      if (pinResp.indexOf("OK") == -1) {
+        if (DEBUG) Serial.println("FEHLER: PIN falsch!");
+        tft.setTextColor(ST7735_RED);
+        tft.println("PIN FALSCH!");
+        tft.setTextColor(ST7735_WHITE);
+        return false;
+      }
+      delay(3000);  // Warten bis SIM entsperrt
+      resp = sendAT("AT+CPIN?", 2000);
+    }
+#endif
+    if (resp.indexOf("READY") == -1) {
+      if (DEBUG) Serial.println("FEHLER: SIM nicht bereit");
+      tft.setTextColor(ST7735_RED);
+      tft.println("SIM nicht bereit!");
+      tft.setTextColor(ST7735_WHITE);
+      delay(3000);
+    }
   }
 
   // Auf Netzwerk-Registrierung warten (max. 60 Sekunden)

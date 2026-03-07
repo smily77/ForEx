@@ -17,8 +17,10 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold18pt7b.h>
 #include "AirportDatabase.h"
+#include "Credentials.h"      // SIM-PIN (nicht auf GitHub)
 
-#define DEBUG true
+#define DEBUG        true
+#define TIMINGDEBUG  true   // true = Kursabruf alle 30 Min (Test); false = täglich 17:00
 
 // ============================================================
 // KONFIGURATION: Airport-Codes für Weltuhren
@@ -156,7 +158,7 @@ void setup() {
   tft.setCursor(0, 0);
 
   // LTE-Modul starten
-  lteSerial.begin(LTE_BAUD);
+  lteSerial.begin(LTE_BAUD, SWSERIAL_8N1, LTE_RX_PIN, LTE_TX_PIN, false, 256); // 256-Byte ISR-Puffer
   tft.println("ForEx v2.1");
   tft.println("LTE Init...");
   tft.print("Provider: ");
@@ -236,9 +238,14 @@ void loop() {
       Serial.println(minute());
     }
 
-    // Täglich um 17:00 Uhr: Zeit re-sync + neue Wechselkurse
+    // Kursabruf: im TIMINGDEBUG-Modus alle 30 Min, sonst täglich um 17:00
+#if TIMINGDEBUG
+    if (minuteLast % 30 == 0) {
+      if (DEBUG) Serial.println("TIMINGDEBUG – Aktualisierung (alle 30 Min)...");
+#else
     if ((hour() == 17) && (minuteLast == 0)) {
       if (DEBUG) Serial.println("17:00 – Tägliche Aktualisierung...");
+#endif
 
       // Zeit vom Netz (kein Datenvolumen)
       time_t newTime = getGsmTime();

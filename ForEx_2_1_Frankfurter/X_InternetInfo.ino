@@ -15,6 +15,8 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Freier Endpunkt, kein API-Key nötig.
 // Liefert NUR die angefragten Währungen → sehr kompakte Antwort (~120 Bytes).
 // httpLen auf 400 gesetzt (grosszügiger Puffer).
+// AT+HTTPPARA="USERDATA" setzt User-Agent + Accept-Header – nötig damit
+// Cloudflare den Request nicht als Bot-Traffic blockiert.
 // Antwort-Beispiel:
 //   {"amount":1.0,"base":"EUR","date":"2026-03-06",
 //    "rates":{"CHF":0.956,"GBP":0.857,"USD":1.085}}
@@ -37,7 +39,16 @@ void catchCurrencies() {
   watchDogTriggered = false;
 
   String resp;
-  String body = "";
+
+  // Statischer Puffer statt String – verhindert Heap-Fragmentierungskrash.
+  static char body[512];
+  int bodyLen = 0;
+  memset(body, 0, sizeof(body));
+
+  if (DEBUG) {
+    Serial.print(F("Freier Heap: "));
+    Serial.println(ESP.getFreeHeap());
+  }
 
   // --- HTTP-Stack initialisieren ---
   // BK-7670 verwendet den aktiven PDP-Kontext (AT+CGACT=1,1) automatisch.
@@ -90,95 +101,88 @@ void catchCurrencies() {
     }
   }
 
-  // GET-Request senden (0 = GET).
-  // Das Modul antwortet zuerst mit "OK" (Befehl akzeptiert), danach asynchron
-  // mit "+HTTPACTION: 0,<status>,<len>\r\n". sendATwait bricht bei Teilempfang
-  // von "+HTTPACTION:" ab – daher warten wir explizit auf die komplette Zeile.
-  resp = sendAT("AT+HTTPACTION=0", 5000);
+  // User-Agent + Accept-Header setzen – Cloudflare blockt Requests ohne plausiblen
+  // User-Agent als Bot-Traffic. AT+HTTPPARA="USERDATA" hängt beliebige HTTP-Header
+  // an (SIM7670-Befehlssatz, \\r\\n als Header-Trenner).
+  resp = sendAT("AT+HTTPPARA=\"USERDATA\",\"User-Agent: Mozilla/5.0\\r\\nAccept: application/json\"", 2000);
+  if (DEBUG) Serial.println("USERDATA: " + resp);
 
-  // Warten auf vollständige URC-Zeile: +HTTPACTION: 0,200,123\r\n
-  // Abbruch erst wenn BEIDE Kommas und ein Newline dahinter vorhanden sind.
+  // GET-Request senden und +HTTPACTION-URC in statischen char-Puffer einlesen.
+  // Kein String, kein realloc() – kein Heap-Stress in der kritischen Wartephase.
+  int httpLen = 0;
   {
+    static char urcBuf[128];
+    int urcLen = 0;
+    memset(urcBuf, 0, sizeof(urcBuf));
+
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(F("AT+HTTPACTION=0"));
+    if (DEBUG) Serial.println(F(">> AT+HTTPACTION=0"));
+
     long tWait = millis();
-    while (millis() - tWait < 30000) {
-      while (lteSerial.available()) resp += (char)lteSerial.read();
-      int hIdx = resp.indexOf("+HTTPACTION:");
-      if (hIdx != -1) {
-        int c1 = resp.indexOf(',', hIdx);
-        int c2 = (c1 != -1) ? resp.indexOf(',', c1 + 1) : -1;
-        if (c2 != -1 && resp.indexOf('\n', c2) != -1) break; // vollständige Zeile
+    while (millis() - tWait < 35000) {
+      while (lteSerial.available() && urcLen < (int)(sizeof(urcBuf) - 1)) {
+        urcBuf[urcLen++] = (char)lteSerial.read();
+        urcBuf[urcLen]   = '\0';
       }
-      delay(200);
+      // Vollständige URC: "+HTTPACTION:" + 2 Kommas + Newline
+      char* hPtr = strstr(urcBuf, "+HTTPACTION:");
+      if (hPtr) {
+        char* c1 = strchr(hPtr, ',');
+        char* c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
+        if (c2 && strchr(c2 + 1, '\n')) break;
+      }
+      if (urcLen >= (int)(sizeof(urcBuf) - 10)) break; // Pufferschutz
+      ESP.wdtFeed();
+      delay(100);
       yield();
     }
-  }
+    if (DEBUG) { Serial.print(F("HTTPACTION: ")); Serial.println(urcBuf); }
 
-  if (DEBUG) Serial.println("HTTPACTION Response: " + resp);
-
-  // HTTP-Statuscode prüfen (200 = OK)
-  if (resp.indexOf(",200,") == -1) {
-    if (DEBUG) {
-      Serial.println("HTTP-Fehler: " + resp);
-      // Antwort-Body lesen und ausgeben – zeigt was der Server zurückgibt
-      delay(30);
-      while (lteSerial.available()) lteSerial.read();
-      lteSerial.println(F("AT+HTTPREAD=0,200"));
-      Serial.println(F(">> AT+HTTPREAD=0,200"));
-      // Modul sendet zuerst "OK\r\n" (Befehlsbestätigung), danach erst
-      // "+HTTPREAD: <len>\r\n<Daten>OK\r\n". Erst nach dem +HTTPREAD-Header
-      // auf das finale OK warten, sonst wird die Bestätigung als Ende erkannt.
-      String errBody = "";
-      long t0 = millis();
-      int errReadAt = -1;
-      while (millis() - t0 < 5000) {
-        while (lteSerial.available()) errBody += (char)lteSerial.read();
-        if (errReadAt < 0) errReadAt = errBody.indexOf("+HTTPREAD:");
-        if (errReadAt >= 0 && errBody.indexOf("OK\r", errReadAt) != -1) break;
-        if (errBody.indexOf("ERROR") != -1) break;
-        yield();
-      }
-      Serial.println("Fehler-Body: " + errBody);
+    // HTTP 200 prüfen
+    if (!strstr(urcBuf, ",200,")) {
+      if (DEBUG) Serial.println(F("HTTP-Fehler oder Timeout"));
+      tft.setTextColor(ST7735_YELLOW);
+      tft.println("HTTP Fehler");
+      tft.setTextColor(ST7735_WHITE);
+      sendAT("AT+HTTPTERM", 1000);
+      secondTick.attach(1, ISRwatchDog);
+      return;
     }
-    tft.setTextColor(ST7735_YELLOW);
-    tft.println("HTTP Fehler");
-    tft.setTextColor(ST7735_WHITE);
-    sendAT("AT+HTTPTERM", 1000);
-    secondTick.attach(1, ISRwatchDog);
-    return;
+
+    // Länge aus ",200,<len>" extrahieren
+    char* lenPtr = strstr(urcBuf, ",200,");
+    httpLen = lenPtr ? atoi(lenPtr + 5) : 0;
   }
 
-  // Datenlänge aus +HTTPACTION: 0,200,<len> extrahieren
-  int httpLen = 0;
-  int lastComma = resp.lastIndexOf(",");
-  if (lastComma != -1) {
-    // Suche Ende der Zahl (CR, LF oder Anführungszeichen)
-    String lenStr = resp.substring(lastComma + 1);
-    lenStr.trim();
-    httpLen = lenStr.toInt();
-  }
   // frankfurter.app liefert nur die angefragten Währungen (~120 Bytes).
-  // Fallback: wenn Server weniger meldet, das Gemeldete lesen; wenn mehr, auf 400 kappen.
-  if (httpLen <= 0 || httpLen > 400) httpLen = 400;
+  if (httpLen <= 0 || httpLen > (int)(sizeof(body) - 1)) httpLen = sizeof(body) - 1;
 
-  // Antwort-Body lesen – direkter Print, kein String-Objekt (Heap-Fragmentierung)
+  // Antwort-Body in statischen char-Buffer lesen.
+  // Modul sendet: OK\r\n  +HTTPREAD: <len>\r\n  <Daten>  OK\r\n
   {
     delay(30);
     while (lteSerial.available()) lteSerial.read();
     lteSerial.print(F("AT+HTTPREAD=0,"));
     lteSerial.println(httpLen);
     if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
-    body = "";
-    body.reserve(httpLen + 50); // Heap vorab reservieren – verhindert viele Reallocations
+
     long t0 = millis();
-    // Modul sendet zuerst "OK\r\n" (Befehlsbestätigung), dann erst:
-    //   +HTTPREAD: <len>\r\n<JSON-Daten>OK\r\n
-    // Erst warten bis "+HTTPREAD:" gesehen, dann auf das finale "OK\r" danach.
-    int httpReadAt = -1;
-    while (millis() - t0 < 12000) {
-      while (lteSerial.available()) body += (char)lteSerial.read();
-      if (httpReadAt < 0) httpReadAt = body.indexOf("+HTTPREAD:");
-      if (httpReadAt >= 0 && body.indexOf("OK\r", httpReadAt) != -1) break;
-      if (body.indexOf("ERROR") != -1) break;
+    bool httpReadSeen = false;
+    int  httpReadPos  = 0;
+
+    while (millis() - t0 < 30000) {
+      while (lteSerial.available() && bodyLen < (int)(sizeof(body) - 1)) {
+        body[bodyLen++] = (char)lteSerial.read();
+        body[bodyLen]   = '\0';
+      }
+      if (!httpReadSeen) {
+        char* p = strstr(body, "+HTTPREAD:");
+        if (p) { httpReadSeen = true; httpReadPos = (int)(p - body); }
+      }
+      if (httpReadSeen && strstr(body + httpReadPos, "OK\r")) break;
+      if (strstr(body, "ERROR")) break;
       yield();
     }
     if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
@@ -188,40 +192,34 @@ void catchCurrencies() {
   sendAT("AT+HTTPTERM", 1000);
   secondTick.attach(1, ISRwatchDog);
 
-  if (body.length() < 10) {
-    if (DEBUG) Serial.println("Leere Antwort – Abbruch");
+  if (bodyLen < 10) {
+    if (DEBUG) Serial.println(F("Leere Antwort – Abbruch"));
     return;
   }
 
   // -------------------------------------------------------
-  // JSON parsen: "CHF":x.xxxx  "USD":x.xxxx  "GBP":x.xxxx
+  // JSON parsen mit strstr/atof – kein String-Objekt nötig.
   // fxSym[0]="CHF", fxSym[1]="USD", fxSym[2]="EUR", fxSym[3]="GBP"
-  // API liefert CHF, USD, GBP relativ zu EUR (Basis).
-  // EUR selbst ist nicht in der Antwort → wird auf 1.0 gesetzt.
+  // API liefert CHF, USD, GBP relativ zu EUR.
+  // EUR selbst nicht in Antwort → 1.0 gesetzt.
   // -------------------------------------------------------
   for (int i = 0; i < 4; i++) {
     if (fxSym[i] != "EUR") {
-      // Suche z.B. "CHF":0.9560 im Body
-      int keyPos = body.indexOf("\"" + fxSym[i] + "\":");
-      if (keyPos != -1) {
-        int valStart = keyPos + fxSym[i].length() + 3; // nach ":"
-        // Wert endet bei Komma, } oder "
-        int valEnd = body.indexOf(",", valStart);
-        int valEnd2 = body.indexOf("}", valStart);
-        if (valEnd == -1 || (valEnd2 != -1 && valEnd2 < valEnd)) valEnd = valEnd2;
-        if (valEnd == -1) valEnd = valStart + 10;
-        String valStr = body.substring(valStart, valEnd);
-        valStr.trim();
-        fxValue[i] = valStr.toFloat();
+      char key[10];
+      snprintf(key, sizeof(key), "\"%s\":", fxSym[i].c_str());
+      char* p = strstr(body, key);
+      if (p) {
+        p += strlen(key);
+        fxValue[i] = atof(p);
       } else {
         fxValue[i] = 0.0;
       }
     } else {
-      fxValue[i] = 1.0;   // EUR ist Basis → 1.0
+      fxValue[i] = 1.0;
     }
 
     if (DEBUG) {
-      Serial.print(fxSym[i]); Serial.print("/EUR raw: ");
+      Serial.print(fxSym[i]); Serial.print(F("/EUR raw: "));
       Serial.println(fxValue[i]);
     }
   }

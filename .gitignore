@@ -109,6 +109,11 @@ sympy-plots-for-*.tex/
 *.xdy
 
 # =========================
+# Lokale Zugangsdaten (nie auf GitHub!)
+# =========================
+Credentials.h
+
+# =========================
 # Operating System Files
 # =========================
 
