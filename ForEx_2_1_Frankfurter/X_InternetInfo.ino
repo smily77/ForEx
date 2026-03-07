@@ -92,11 +92,41 @@ void catchCurrencies() {
     }
   }
 
-  // User-Agent + Accept-Header setzen – Cloudflare blockt Requests ohne plausiblen
-  // User-Agent als Bot-Traffic. AT+HTTPPARA="USERDATA" hängt beliebige HTTP-Header
-  // an (SIM7670-Befehlssatz, \r\n als Header-Trenner).
-  resp = sendAT("AT+HTTPPARA=\"USERDATA\",\"User-Agent: Mozilla/5.0\\r\\nAccept: application/json\"", 2000);
-  if (DEBUG) Serial.println("USERDATA: " + resp);
+  // User-Agent + weitere Header setzen – Cloudflare blockt Bot-Traffic ohne
+  // plausiblen Browser-UA. AT+HTTPPARA="USERDATA" hängt eigene HTTP-Header an
+  // (SIM7670-Befehlssatz, Modul interpretiert \\r\\n als CRLF-Trenner).
+  // ACHTUNG: Befehl ist >76 Zeichen → RX-ISR deaktivieren um Byte-Korruption
+  // (gleiche Ursache wie beim URL-Befehl) zu vermeiden.
+  // User-Agent: vollständiger Chrome-UA; "Mozilla/5.0" allein reicht Cloudflare nicht.
+  {
+    // Buffer: AT+HTTPPARA="USERDATA","<headers>" – max ~220 Zeichen + NUL
+    char udCmd[256];
+    snprintf(udCmd, sizeof(udCmd),
+      "AT+HTTPPARA=\"USERDATA\","
+      "\"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/120.0.0.0 Safari/537.36\\r\\n"
+      "Accept: application/json\\r\\n"
+      "Accept-Language: en-US,en;q=0.9\"");
+
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+
+    if (DEBUG) { Serial.print(F(">> ")); Serial.println(udCmd); }
+
+    lteSerial.enableRx(false);
+    lteSerial.println(udCmd);
+    lteSerial.enableRx(true);
+
+    resp = "";
+    long t0 = millis();
+    while (millis() - t0 < 2000) {
+      while (lteSerial.available()) resp += (char)lteSerial.read();
+      if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) break;
+      yield();
+    }
+    if (DEBUG) { Serial.print(F("USERDATA: ")); Serial.println(resp); }
+  }
 
   // GET-Request senden (0 = GET).
   // Das Modul antwortet zuerst mit "OK" (Befehl akzeptiert), danach asynchron
