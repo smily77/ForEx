@@ -30,11 +30,8 @@ void catchCurrencies() {
     Serial.println(httpPath);
   }
 
-  // Eigenen 60s-Watchdog während HTTP pausieren – die gesamte HTTP-Sequenz
-  // (HTTPINIT + SSL + GET + HTTPREAD) kann 30-50 s dauern.
-  secondTick.detach();
-  watchDogCount     = 0;
-  watchDogTriggered = false;
+  // Watchdog läuft weiter (180s Timeout reicht für HTTP-Sequenz)
+  watchDogCount = 0;
 
   String resp;
 
@@ -62,7 +59,6 @@ void catchCurrencies() {
     tft.println("HTTP Init fehl");
     tft.setTextColor(ST7735_WHITE);
     sendAT("AT+HTTPTERM", 1000);
-    secondTick.attach(1, ISRwatchDog);
     return;
   }
 
@@ -86,7 +82,7 @@ void catchCurrencies() {
     lteSerial.enableRx(true);    // RX-ISR wieder an, bereit für Modul-Antwort
 
     resp = "";
-    long t0 = millis();
+    unsigned long t0 = millis();
     while (millis() - t0 < 3000) {
       while (lteSerial.available()) resp += (char)lteSerial.read();
       if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) break;
@@ -111,7 +107,7 @@ void catchCurrencies() {
     lteSerial.println(F("AT+HTTPACTION=0"));
     if (DEBUG) Serial.println(F(">> AT+HTTPACTION=0"));
 
-    long tWait = millis();
+    unsigned long tWait = millis();
     while (millis() - tWait < 35000) {
       while (lteSerial.available() && urcLen < (int)(sizeof(urcBuf) - 1)) {
         urcBuf[urcLen++] = (char)lteSerial.read();
@@ -138,7 +134,6 @@ void catchCurrencies() {
       tft.println("HTTP Fehler");
       tft.setTextColor(ST7735_WHITE);
       sendAT("AT+HTTPTERM", 1000);
-      secondTick.attach(1, ISRwatchDog);
       return;
     }
 
@@ -159,7 +154,7 @@ void catchCurrencies() {
     lteSerial.println(httpLen);
     if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
 
-    long t0 = millis();
+    unsigned long t0 = millis();
     bool httpReadSeen = false;
     int  httpReadPos  = 0;
 
@@ -179,9 +174,8 @@ void catchCurrencies() {
     if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
   }
 
-  // HTTP-Stack beenden und eigenen Watchdog wieder aktivieren
+  // HTTP-Stack beenden
   sendAT("AT+HTTPTERM", 1000);
-  secondTick.attach(1, ISRwatchDog);
 
   if (bodyLen < 10) {
     if (DEBUG) Serial.println(F("Leere Antwort – Abbruch"));
@@ -203,9 +197,8 @@ void catchCurrencies() {
       if (p) {
         p += strlen(key);
         fxValue[i] = atof(p);
-      } else {
-        fxValue[i] = 0.0;
       }
+      // Kein else: alten Wert behalten wenn Währung nicht in Antwort
     } else {
       fxValue[i] = 1.0;
     }

@@ -15,7 +15,7 @@ String sendAT(const String& cmd, int timeout = 1000) {
 
   String response;
   response.reserve(128);  // Heap-Fragmentierung vermeiden
-  long tStart = millis();
+  unsigned long tStart = millis();
   while (millis() - tStart < timeout) {
     while (lteSerial.available()) {
       response += (char)lteSerial.read();
@@ -41,7 +41,7 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout = 5000) 
 
   String response;
   response.reserve(128);  // Heap-Fragmentierung vermeiden
-  long tStart = millis();
+  unsigned long tStart = millis();
   while (millis() - tStart < timeout) {
     while (lteSerial.available()) {
       response += (char)lteSerial.read();
@@ -96,7 +96,7 @@ bool initLTE() {
       // Antwort abwarten
       String pinResp;
       pinResp.reserve(64);
-      long t0 = millis();
+      unsigned long t0 = millis();
       while (millis() - t0 < 5000) {
         while (lteSerial.available()) pinResp += (char)lteSerial.read();
         if (pinResp.indexOf("OK") != -1 || pinResp.indexOf("ERROR") != -1) break;

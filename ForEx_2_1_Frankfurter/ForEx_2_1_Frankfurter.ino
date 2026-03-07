@@ -107,7 +107,9 @@ int    helligkeit;
 boolean firstRun = true;
 
 // ============================================================
-// WATCHDOG (60-Sekunden-Timeout → ESP-Reset)
+// WATCHDOG (180-Sekunden-Timeout → ESP-Reset)
+// Wird nur bei Minutenwechsel gefüttert – erkennt so auch
+// eingefrorene Zustände, nicht nur blockierte Loops.
 // WICHTIG: Ticker-ISR darf keine blockierenden Operationen
 // ausführen (delay, TFT, Serial). Nur Flag setzen, Aktion
 // im Haupt-Loop ausführen.
@@ -118,7 +120,7 @@ volatile bool watchDogTriggered = false;
 
 void ISRwatchDog() {
   watchDogCount++;
-  if (watchDogCount >= 60) {
+  if (watchDogCount >= 180) {
     watchDogTriggered = true;   // Nur Flag setzen – kein Blocking im ISR!
   }
 }
@@ -126,7 +128,6 @@ void ISRwatchDog() {
 void watchDogFeed() {
   watchDogCount     = 0;
   watchDogTriggered = false;
-  delay(1);
 }
 
 void watchDogAction() {
@@ -239,30 +240,37 @@ void loop() {
       Serial.println(minute());
     }
 
-    // Kursabruf: im TIMINGDEBUG-Modus alle 30 Min, sonst täglich um 17:00
-#if TIMINGDEBUG
-    if (minuteLast % 30 == 0) {
-      if (DEBUG) Serial.println("TIMINGDEBUG – Aktualisierung (alle 30 Min)...");
-#else
-    if ((hour() == 17) && (minuteLast == 0)) {
-      if (DEBUG) Serial.println("17:00 – Tägliche Aktualisierung...");
-#endif
-
-      // Zeit vom Netz (kein Datenvolumen)
+    // Zeit-Resync alle 6 Stunden (kostet kein Datenvolumen)
+    if (minuteLast == 0 && (hour() % 6) == 0) {
       time_t newTime = getGsmTime();
       if (newTime != 0) {
         setTime(newTime);
-        if (DEBUG) Serial.println("Zeit re-sync OK");
+        if (DEBUG) Serial.println(F("Zeit re-sync OK"));
       } else {
-        if (DEBUG) Serial.println("Zeit re-sync fehlgeschlagen");
+        if (DEBUG) Serial.println(F("Zeit re-sync fehlgeschlagen"));
       }
+    }
 
-      // Wechselkurse (Datenvolumen)
+    // Kursabruf: im TIMINGDEBUG-Modus alle 30 Min, sonst täglich um 17:00
+#if TIMINGDEBUG
+    if (minuteLast % 30 == 0) {
+      if (DEBUG) Serial.println(F("TIMINGDEBUG – Aktualisierung (alle 30 Min)..."));
+#else
+    if ((hour() == 17) && (minuteLast == 0)) {
+      if (DEBUG) Serial.println(F("17:00 – Tägliche Aktualisierung..."));
+#endif
       catchCurrencies();
-      if (DEBUG) Serial.println("Kurse aktualisiert");
+      // Retry nach 30s bei Fehler (fxValue[0]=CHF muss > 0 sein)
+      if (fxValue[0] <= 0.0) {
+        if (DEBUG) Serial.println(F("Kursabruf fehlgeschlagen, Retry in 30s..."));
+        delay(30000);
+        catchCurrencies();
+      }
+      if (DEBUG) Serial.println(F("Kurse aktualisiert"));
     }
 
     displayMainScreen();
+    watchDogFeed();  // Nur bei Minutenwechsel – beweist, dass Uhr läuft
   }
 
   // Helligkeit über Potentiometer / LDR an A0 anpassen (im Debug-Modus deaktiviert)
@@ -272,5 +280,5 @@ void loop() {
     analogWrite(ledPin, helligkeit);
   }
 
-  watchDogFeed();
+  yield();
 }

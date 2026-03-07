@@ -14,7 +14,7 @@ String sendAT(const String& cmd, int timeout = 1000) {
   lteSerial.println(cmd);
 
   String response = "";
-  long tStart = millis();
+  unsigned long tStart = millis();
   while (millis() - tStart < timeout) {
     while (lteSerial.available()) {
       response += (char)lteSerial.read();
@@ -38,7 +38,7 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout = 5000) 
   lteSerial.println(cmd);
 
   String response = "";
-  long tStart = millis();
+  unsigned long tStart = millis();
   while (millis() - tStart < timeout) {
     while (lteSerial.available()) {
       response += (char)lteSerial.read();
