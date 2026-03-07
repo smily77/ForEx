@@ -59,19 +59,15 @@ public:
     sendAT("AT+CIPMODE=0", 1000);   // Non-Transparent-Modus
 
     // Netzwerk-Socket-Dienst starten
-    String resp = sendATwait("AT+NETOPEN", "+NETOPEN:", 15000);
-    // +NETOPEN: 0 = Erfolg, bereits offen → auch OK
-    if (resp.indexOf("+NETOPEN: 0") == -1 &&
-        resp.indexOf("+NETOPEN: 1") == -1 &&
-        resp.indexOf("already")    == -1) {
-      // Trotzdem weiterversuchen – manche Firmware-Versionen melden anders
-    }
+    // Auf OK warten (NETOPEN: 0 kommt asynchron, aber OK reicht als Bestätigung)
+    String resp = sendATwait("AT+NETOPEN", "OK", 15000);
+    delay(1000);  // Modul braucht Zeit zum Öffnen des Netzwerk-Sockets
 
     // TCP-Verbindung öffnen
     char cmd[128];
     snprintf(cmd, sizeof(cmd),
              "AT+CIPOPEN=0,\"TCP\",\"%s\",%d", host, port);
-    resp = sendATwait(String(cmd), "+CIPOPEN:", 20000);
+    resp = sendATwait(String(cmd), "+CIPOPEN: 0,0", 20000);
 
     // +CIPOPEN: 0,0 = Link 0, Ergebnis 0 (Erfolg)
     if (resp.indexOf("+CIPOPEN: 0,0") != -1) {
