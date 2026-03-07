@@ -37,7 +37,17 @@ void catchCurrencies() {
   watchDogTriggered = false;
 
   String resp;
-  String body = "";
+
+  // Statischer Puffer statt String – verhindert Heap-Fragmentierungskrash
+  // nach langem Betrieb. 'static' → liegt im BSS-Segment, nicht auf Stack/Heap.
+  static char body[2600];
+  int bodyLen = 0;
+  memset(body, 0, sizeof(body));
+
+  if (DEBUG) {
+    Serial.print(F("Freier Heap: "));
+    Serial.println(ESP.getFreeHeap());
+  }
 
   // --- HTTP-Stack initialisieren ---
   // BK-7670 verwendet den aktiven PDP-Kontext (AT+CGACT=1,1) automatisch.
@@ -147,36 +157,42 @@ void catchCurrencies() {
 
   // Datenlänge aus +HTTPACTION: 0,200,<len> extrahieren
   int httpLen = 0;
-  int lastComma = resp.lastIndexOf(",");
-  if (lastComma != -1) {
-    // Suche Ende der Zahl (CR, LF oder Anführungszeichen)
-    String lenStr = resp.substring(lastComma + 1);
-    lenStr.trim();
-    httpLen = lenStr.toInt();
+  {
+    int lastComma = resp.lastIndexOf(",");
+    if (lastComma != -1) {
+      httpLen = resp.substring(lastComma + 1).toInt();
+    }
   }
   // exchangerate-api.com liefert alle Währungen (~2500 Bytes bis USD).
   // Fallback: wenn Server weniger meldet, das Gemeldete lesen; wenn mehr, auf 2500 kappen.
-  if (httpLen <= 0 || httpLen > 2500) httpLen = 2500;
+  // Puffer-Obergrenze: sizeof(body)-1 = 2599 Bytes.
+  if (httpLen <= 0 || httpLen > (int)(sizeof(body) - 1)) httpLen = sizeof(body) - 1;
 
-  // Antwort-Body lesen – direkter Print, kein String-Objekt (Heap-Fragmentierung)
+  // Antwort-Body in statischen char-Buffer lesen.
+  // Modul sendet: OK\r\n  +HTTPREAD: <len>\r\n  <Daten>  OK\r\n
+  // Warten bis "+HTTPREAD:" gesehen UND danach "OK\r" (End-Markierung).
   {
     delay(30);
     while (lteSerial.available()) lteSerial.read();
     lteSerial.print(F("AT+HTTPREAD=0,"));
     lteSerial.println(httpLen);
     if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
-    body = "";
-    body.reserve(httpLen + 50); // Heap vorab reservieren – verhindert viele Reallocations
+
     long t0 = millis();
-    // Modul sendet zuerst "OK\r\n" (Befehlsbestätigung), dann erst:
-    //   +HTTPREAD: <len>\r\n<JSON-Daten>OK\r\n
-    // Erst warten bis "+HTTPREAD:" gesehen, dann auf das finale "OK\r" danach.
-    int httpReadAt = -1;
-    while (millis() - t0 < 12000) {
-      while (lteSerial.available()) body += (char)lteSerial.read();
-      if (httpReadAt < 0) httpReadAt = body.indexOf("+HTTPREAD:");
-      if (httpReadAt >= 0 && body.indexOf("OK\r", httpReadAt) != -1) break;
-      if (body.indexOf("ERROR") != -1) break;
+    bool httpReadSeen = false;
+    int  httpReadPos  = 0;
+
+    while (millis() - t0 < 20000) {
+      while (lteSerial.available() && bodyLen < (int)(sizeof(body) - 1)) {
+        body[bodyLen++] = (char)lteSerial.read();
+        body[bodyLen]   = '\0';
+      }
+      if (!httpReadSeen) {
+        char* p = strstr(body, "+HTTPREAD:");
+        if (p) { httpReadSeen = true; httpReadPos = (int)(p - body); }
+      }
+      if (httpReadSeen && strstr(body + httpReadPos, "OK\r")) break;
+      if (strstr(body, "ERROR")) break;
       yield();
     }
     if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
@@ -186,40 +202,35 @@ void catchCurrencies() {
   sendAT("AT+HTTPTERM", 1000);
   secondTick.attach(1, ISRwatchDog);
 
-  if (body.length() < 10) {
-    if (DEBUG) Serial.println("Leere Antwort – Abbruch");
+  if (bodyLen < 10) {
+    if (DEBUG) Serial.println(F("Leere Antwort – Abbruch"));
     return;
   }
 
   // -------------------------------------------------------
-  // JSON parsen: "CHF":x.xxxx  "USD":x.xxxx  "GBP":x.xxxx
+  // JSON parsen mit strstr/atof – kein String-Objekt nötig.
   // fxSym[0]="CHF", fxSym[1]="USD", fxSym[2]="EUR", fxSym[3]="GBP"
-  // API liefert CHF, USD, GBP relativ zu EUR (Basis).
-  // EUR selbst ist nicht in der Antwort → wird auf 1.0 gesetzt.
+  // API liefert CHF, USD, GBP relativ zu EUR.
+  // EUR selbst nicht in Antwort → 1.0 gesetzt.
   // -------------------------------------------------------
   for (int i = 0; i < 4; i++) {
     if (fxSym[i] != "EUR") {
-      // Suche z.B. "CHF":0.9560 im Body
-      int keyPos = body.indexOf("\"" + fxSym[i] + "\":");
-      if (keyPos != -1) {
-        int valStart = keyPos + fxSym[i].length() + 3; // nach ":"
-        // Wert endet bei Komma, } oder "
-        int valEnd = body.indexOf(",", valStart);
-        int valEnd2 = body.indexOf("}", valStart);
-        if (valEnd == -1 || (valEnd2 != -1 && valEnd2 < valEnd)) valEnd = valEnd2;
-        if (valEnd == -1) valEnd = valStart + 10;
-        String valStr = body.substring(valStart, valEnd);
-        valStr.trim();
-        fxValue[i] = valStr.toFloat();
+      // Suchschlüssel z.B. "\"CHF\":"
+      char key[10];
+      snprintf(key, sizeof(key), "\"%s\":", fxSym[i].c_str());
+      char* p = strstr(body, key);
+      if (p) {
+        p += strlen(key);
+        fxValue[i] = atof(p);
       } else {
         fxValue[i] = 0.0;
       }
     } else {
-      fxValue[i] = 1.0;   // EUR ist Basis → 1.0
+      fxValue[i] = 1.0;
     }
 
     if (DEBUG) {
-      Serial.print(fxSym[i]); Serial.print("/EUR raw: ");
+      Serial.print(fxSym[i]); Serial.print(F("/EUR raw: "));
       Serial.println(fxValue[i]);
     }
   }
