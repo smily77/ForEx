@@ -1,279 +1,409 @@
 // X_InternetInfo.ino – ForEx_2_1_Frankfurter
 // Wechselkurse per LTE-Modul BK-7670 abrufen.
+//
+// ARCHITEKTUR (v2.1-FR-SSL):
+//   Statt den eingebauten HTTP/SSL-Stack des BK-7670 zu nutzen (dessen
+//   TLS-Fingerprint von Cloudflare blockiert wird), öffnet das Modul nur
+//   eine rohe TCP-Verbindung.  BearSSL auf dem ESP8266 übernimmt den
+//   TLS-Handshake – mit demselben JA3-Fingerprint wie beim 4G-Modem/WiFi.
+//
+//   LTEClient  (AT+CIPOPEN, TCP-Transport)
+//       ↓
+//   ESP_SSLClient  (BearSSL TLS, läuft auf ESP8266)
+//       ↓
+//   api.frankfurter.app:443  (Cloudflare akzeptiert BearSSL-JA3)
+//
+// ABHÄNGIGKEIT:
+//   Bibliothek "ESP_SSLClient" von mobizt installieren:
+//     Arduino IDE: Sketch → Bibliothek einbinden → Bibliotheken verwalten
+//                  → "ESP_SSLClient" suchen und installieren
+//     PlatformIO:  lib_deps = mobizt/ESP_SSLClient
+//
 // Forward-Deklarationen nötig, da Arduino .ino-Dateien alphabetisch
 // zusammengeführt werden und X_ vor x_subroutines kommt.
 String sendAT(const String& cmd, int timeout);
 String sendATwait(const String& cmd, const String& waitFor, int timeout);
 
-// Verwendet den eingebauten HTTP-Stack des Moduls (AT+HTTPINIT / HTTPACTION).
-// Die AT-Befehlssyntax folgt dem 3GPP-Standard / SIMCom-kompatiblem Befehlssatz.
-// Falls der BK-7670 einen anderen HTTP-Befehlssatz verwendet, bitte Datenblatt
-// konsultieren und die Befehle unten entsprechend anpassen.
+// ============================================================
+// LTEClient – Arduino-Client-Adapter für BK-7670 (SIMCom A7670E)
+//
+// Stellt eine rohe TCP-Verbindung über die AT-Befehle des Moduls her.
+// Implementiert das Arduino-Client-Interface, damit ESP_SSLClient
+// (BearSSL) darauf aufsetzen kann.
+//
+// AT-Befehlssatz: NETOPEN / CIPOPEN / CIPSEND / CIPRXGET / CIPCLOSE
+// Referenz: A76XX Series TCPIP Application Note (SIMCom)
+// ============================================================
+class LTEClient : public Client {
+public:
 
-// Primäre API: https://api.frankfurter.app/latest?from=EUR&to=CHF,USD,GBP
-//   Gehostet von Frankfurter (Open Source, Cloudflare CDN).
-//   Freier Endpunkt, kein API-Key nötig.
-//   Liefert NUR die angefragten Währungen → sehr kompakte Antwort (~120 Bytes).
-//   PROBLEM: Cloudflare blockiert den BK-7670 per TLS-Fingerprinting (JA3).
-//   HTTP-Header allein reichen nicht – Cloudflare erkennt den TLS-Handshake
-//   des Modul-Chipsatzes als Nicht-Browser und antwortet mit 403.
-//
-// Fallback-API: https://api.exchangerate-api.com/v4/latest/EUR
-//   Fastly CDN (kein Cloudflare) → breite TLS-Kompatibilität, kein Bot-Blocking.
-//   Freier Endpunkt, kein API-Key nötig.
-//   Antwort enthält alle ~160 Währungen (~2500 Bytes) – grösser, aber zuverlässig.
-//   JSON-Format identisch ({"rates":{"CHF":...}}) → gleicher Parser funktioniert.
-//
-// Strategie: frankfurter.app zuerst versuchen (kompakter). Bei 403 oder anderem
-// Fehler automatisch auf exchangerate-api.com umschalten.
+  // --- Verbindung aufbauen ---
+  int connect(const char *host, uint16_t port) override {
+    _connected = false;
+    _rxLen = 0;
+    _rxPos = 0;
+    _lastPoll = 0;
+
+    // Buffered-Receive: Modul puffert eingehende TCP-Daten,
+    // kein unerwartetes Daten-Dump auf UART.
+    sendAT("AT+CIPRXGET=1", 2000);
+
+    // Alte Verbindungen aufräumen
+    sendAT("AT+CIPCLOSE=0", 2000);
+    sendAT("AT+NETCLOSE", 5000);
+    delay(500);
+
+    // PDP-Kontext 1 verwenden (gleicher wie in initLTE/CGACT)
+    sendAT("AT+CSOCKSETPN=1", 1000);
+    sendAT("AT+CIPMODE=0", 1000);   // Non-Transparent-Modus
+
+    // Netzwerk-Socket-Dienst starten
+    String resp = sendATwait("AT+NETOPEN", "+NETOPEN:", 15000);
+    // +NETOPEN: 0 = Erfolg, bereits offen → auch OK
+    if (resp.indexOf("+NETOPEN: 0") == -1 &&
+        resp.indexOf("+NETOPEN: 1") == -1 &&
+        resp.indexOf("already")    == -1) {
+      // Trotzdem weiterversuchen – manche Firmware-Versionen melden anders
+    }
+
+    // TCP-Verbindung öffnen
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd),
+             "AT+CIPOPEN=0,\"TCP\",\"%s\",%d", host, port);
+    resp = sendATwait(String(cmd), "+CIPOPEN:", 20000);
+
+    // +CIPOPEN: 0,0 = Link 0, Ergebnis 0 (Erfolg)
+    if (resp.indexOf("+CIPOPEN: 0,0") != -1) {
+      _connected = true;
+      return 1;
+    }
+    return 0;
+  }
+
+  int connect(IPAddress ip, uint16_t port) override {
+    char host[16];
+    snprintf(host, sizeof(host), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+    return connect(host, port);
+  }
+
+  // --- Daten senden ---
+  size_t write(uint8_t b) override { return write(&b, 1); }
+
+  size_t write(const uint8_t *buf, size_t size) override {
+    if (!_connected || size == 0) return 0;
+
+    // A7670 CIPSEND max 1460 Bytes pro Aufruf (ein TCP-Segment)
+    int toSend = (size > 1024) ? 1024 : (int)size;
+
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=0,%d", toSend);
+
+    // AT-Befehl senden, auf ">" Prompt warten
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(cmd);
+
+    bool gotPrompt = false;
+    unsigned long t0 = millis();
+    while (millis() - t0 < 5000) {
+      while (lteSerial.available()) {
+        if (lteSerial.read() == '>') { gotPrompt = true; break; }
+      }
+      if (gotPrompt) break;
+      yield();
+    }
+    if (!gotPrompt) { _connected = false; return 0; }
+
+    // Restliche Zeichen nach ">" konsumieren
+    delay(10);
+    while (lteSerial.available()) lteSerial.read();
+
+    // Binärdaten senden – RX-ISR deaktivieren (Bit-Korruptionsschutz,
+    // SoftwareSerial-TX ist auf ESP8266 nicht interrupt-sicher ab ~76 Bytes)
+    lteSerial.enableRx(false);
+    for (int i = 0; i < toSend; i++) {
+      lteSerial.write(buf[i]);
+    }
+    lteSerial.enableRx(true);
+
+    // +CIPSEND Bestätigung abwarten
+    String resp = "";
+    t0 = millis();
+    while (millis() - t0 < 10000) {
+      while (lteSerial.available()) resp += (char)lteSerial.read();
+      if (resp.indexOf("+CIPSEND:") != -1) break;
+      if (resp.indexOf("ERROR") != -1) { _connected = false; return 0; }
+      yield();
+    }
+    return toSend;
+  }
+
+  // --- Daten empfangen ---
+  int available() override {
+    if (_rxPos < _rxLen) return _rxLen - _rxPos;
+
+    // Modul nicht öfter als alle 50 ms abfragen (BearSSL pollt intensiv)
+    unsigned long now = millis();
+    if (now - _lastPoll < 50) return 0;
+    _lastPoll = now;
+
+    // Modul nach gepufferten Bytes fragen
+    String resp = sendAT("AT+CIPRXGET=4,0", 1000);
+    int idx = resp.indexOf("+CIPRXGET: 4,0,");
+    if (idx >= 0) {
+      int avail = resp.substring(idx + 15).toInt();
+      if (avail > 0) {
+        _pullFromModule(avail);
+        return _rxLen - _rxPos;
+      }
+    }
+    return 0;
+  }
+
+  int read() override {
+    uint8_t b;
+    if (read(&b, 1) == 1) return b;
+    return -1;
+  }
+
+  int read(uint8_t *buf, size_t size) override {
+    // Aus lokalem Puffer bedienen
+    if (_rxPos < _rxLen) {
+      int avail = _rxLen - _rxPos;
+      int n = ((int)size < avail) ? (int)size : avail;
+      memcpy(buf, _rxBuf + _rxPos, n);
+      _rxPos += n;
+      return n;
+    }
+
+    // Puffer leer → vom Modul nachladen
+    String resp = sendAT("AT+CIPRXGET=4,0", 1000);
+    int idx = resp.indexOf("+CIPRXGET: 4,0,");
+    if (idx < 0) return 0;
+    int moduleAvail = resp.substring(idx + 15).toInt();
+    if (moduleAvail <= 0) return 0;
+
+    _pullFromModule(moduleAvail);
+
+    if (_rxLen <= 0) return 0;
+    int n = ((int)size < _rxLen) ? (int)size : _rxLen;
+    memcpy(buf, _rxBuf, n);
+    _rxPos = n;
+    return n;
+  }
+
+  int peek() override {
+    if (_rxPos < _rxLen) return _rxBuf[_rxPos];
+    return -1;
+  }
+
+  void flush() override { }
+
+  void stop() override {
+    sendAT("AT+CIPCLOSE=0", 5000);
+    delay(500);
+    sendAT("AT+NETCLOSE", 5000);
+    _connected = false;
+    _rxLen = 0;
+    _rxPos = 0;
+  }
+
+  uint8_t connected() override { return _connected ? 1 : 0; }
+  operator bool() override { return _connected; }
+
+private:
+  bool _connected = false;
+  uint8_t _rxBuf[512];          // Lokaler Empfangspuffer
+  int _rxLen = 0;               // Gültige Bytes im Puffer
+  int _rxPos = 0;               // Aktuelle Leseposition
+  unsigned long _lastPoll = 0;  // Letzte Modul-Abfrage (Throttle)
+
+  // Daten vom Modul in den lokalen Puffer lesen.
+  // AT+CIPRXGET=2,0,<len> → +CIPRXGET: 2,0,<actual>,<remaining>\r\n<Daten>\r\nOK
+  void _pullFromModule(int moduleAvail) {
+    _rxLen = 0;
+    _rxPos = 0;
+
+    int toRead = moduleAvail;
+    if (toRead > (int)sizeof(_rxBuf)) toRead = (int)sizeof(_rxBuf);
+
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "AT+CIPRXGET=2,0,%d", toRead);
+
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(cmd);
+
+    // Header lesen: +CIPRXGET: 2,0,<actual>,<remaining>\r\n
+    String header = "";
+    bool gotHeader = false;
+    unsigned long t0 = millis();
+    while (millis() - t0 < 5000) {
+      while (lteSerial.available()) {
+        char c = (char)lteSerial.read();
+        header += c;
+        if (header.endsWith("\n") && header.indexOf("+CIPRXGET: 2") >= 0) {
+          gotHeader = true;
+          break;
+        }
+      }
+      if (gotHeader) break;
+      yield();
+    }
+    if (!gotHeader) return;
+
+    // Tatsächliche Datenlänge parsen
+    int idx = header.indexOf("+CIPRXGET: 2,0,");
+    if (idx < 0) return;
+    int actual = header.substring(idx + 15).toInt();
+    if (actual <= 0) return;
+    if (actual > (int)sizeof(_rxBuf)) actual = sizeof(_rxBuf);
+
+    // Exakt 'actual' Bytes Binärdaten lesen
+    t0 = millis();
+    while (_rxLen < actual && millis() - t0 < 5000) {
+      while (lteSerial.available() && _rxLen < actual) {
+        _rxBuf[_rxLen++] = lteSerial.read();
+      }
+      if (_rxLen >= actual) break;
+      yield();
+    }
+
+    // Trailing \r\nOK\r\n konsumieren
+    delay(50);
+    while (lteSerial.available()) lteSerial.read();
+  }
+};
+
+// ============================================================
+// WECHSELKURSE ABRUFEN
+// ============================================================
 
 void catchCurrencies() {
-  // Zwei API-Endpunkte: kompakt (Cloudflare) und zuverlässig (Fastly)
-  const char* apiHost[] = {
-    "api.frankfurter.app",
-    "api.exchangerate-api.com"
-  };
-  const char* apiPath[] = {
-    "/latest?from=EUR&to=CHF,USD,GBP",
-    "/v4/latest/EUR"
-  };
-  const int apiCount = 2;
-
-  if (DEBUG) Serial.println(F("=== catchCurrencies ==="));
-
-  // Eigenen 60s-Watchdog während HTTP pausieren – die gesamte HTTP-Sequenz
-  // (HTTPINIT + SSL + GET + HTTPREAD) kann 30-50 s dauern.
-  secondTick.detach();
-  watchDogCount     = 0;
-  watchDogTriggered = false;
-
-  String resp;
-
-  // Statischer Puffer statt String – verhindert Heap-Fragmentierungskrash
-  // nach langem Betrieb. 2600 Bytes nötig für die grosse Fallback-Antwort.
-  static char body[2600];
-  int bodyLen = 0;
+  const char* httpHost = "api.frankfurter.app";
+  const char* httpPath = "/latest?from=EUR&to=CHF,USD,GBP";
 
   if (DEBUG) {
+    Serial.println(F("=== catchCurrencies (SSL-Passthrough) ==="));
+    Serial.print(F("URL: https://"));
+    Serial.print(httpHost);
+    Serial.println(httpPath);
     Serial.print(F("Freier Heap: "));
     Serial.println(ESP.getFreeHeap());
   }
 
-  bool gotData = false;
+  // Eigenen 60s-Watchdog während TLS pausieren
+  secondTick.detach();
+  watchDogCount     = 0;
+  watchDogTriggered = false;
 
-  // ---------------------------------------------------------------
-  // Schleife über API-Endpunkte: frankfurter.app zuerst, dann Fallback
-  // ---------------------------------------------------------------
-  for (int api = 0; api < apiCount && !gotData; api++) {
-    const char* httpHost = apiHost[api];
-    const char* httpPath = apiPath[api];
+  // Statischer Puffer für HTTP-Antwort (frankfurter.app: ~120 Bytes)
+  static char body[512];
+  int bodyLen = 0;
+  memset(body, 0, sizeof(body));
+  bool success = false;
 
-    memset(body, 0, sizeof(body));
-    bodyLen = 0;
+  // --- TCP-Verbindung über LTEClient öffnen ---
+  LTEClient lteClient;
 
-    if (DEBUG) {
-      if (api > 0) Serial.println(F("--- Fallback-API ---"));
-      Serial.print(F("URL: https://"));
-      Serial.print(httpHost);
-      Serial.println(httpPath);
-    }
+  if (DEBUG) Serial.println(F("TCP-Verbindung aufbauen..."));
 
-    // --- HTTP-Stack initialisieren ---
-    // BK-7670 verwendet den aktiven PDP-Kontext (AT+CGACT=1,1) automatisch.
-    // SAPBR und CID werden von diesem Modul nicht unterstützt.
-    sendAT("AT+HTTPTERM", 1000);   // evtl. offene Session beenden
-    delay(200);
-
-    resp = sendAT("AT+HTTPINIT", 3000);
-    if (resp.indexOf("OK") == -1) {
-      if (DEBUG) Serial.println("HTTPINIT fehlgeschlagen: " + resp);
-      if (api == apiCount - 1) {
-        tft.setTextColor(ST7735_YELLOW);
-        tft.println("HTTP Init fehl");
-        tft.setTextColor(ST7735_WHITE);
-      }
-      sendAT("AT+HTTPTERM", 1000);
-      continue;
-    }
-
-    // URL setzen – vollständigen AT-Befehl in char[] bauen und als EINE println()-
-    // Übertragung senden. Während TX den SoftwareSerial-RX-Interrupt deaktivieren:
-    // Auf ESP8266 ist SoftwareSerial-TX nicht interrupt-sicher – der RX-ISR feuert
-    // zwischen TX-Bits und zerstört das Byte-Timing (Korruption ab ~Byte 76).
-    {
-      // Buffer: "AT+HTTPPARA="URL","https://<host><path>"" + NUL
-      // Längste URL: exchangerate-api.com/v4/latest/EUR → ~65 Zeichen
-      // frankfurter.app/latest?from=EUR&to=CHF,USD,GBP   → ~80 Zeichen
-      // Mit AT-Prefix: ~120 Zeichen max → passt in 128 Bytes.
-      char urlCmd[128];
-      snprintf(urlCmd, sizeof(urlCmd),
-               "AT+HTTPPARA=\"URL\",\"https://%s%s\"", httpHost, httpPath);
-
-      delay(30);
-      while (lteSerial.available()) lteSerial.read();
-
-      if (DEBUG) { Serial.print(F(">> ")); Serial.println(urlCmd); }
-
-      lteSerial.enableRx(false);   // RX-ISR aus → kein Interrupt-Jitter beim TX
-      lteSerial.println(urlCmd);
-      lteSerial.enableRx(true);    // RX-ISR wieder an, bereit für Modul-Antwort
-
-      resp = "";
-      long t0 = millis();
-      while (millis() - t0 < 3000) {
-        while (lteSerial.available()) resp += (char)lteSerial.read();
-        if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) break;
-        yield();
-      }
-      if (DEBUG) { Serial.print(F("<< ")); Serial.println(resp); }
-      if (resp.indexOf("OK") == -1) {
-        if (DEBUG) Serial.println(F("URL-Param fehlgeschlagen"));
-      }
-    }
-
-    // User-Agent + Host + Accept-Header setzen.
-    // Vollständiger Browser-UA – minimiert Cloudflare-Bot-Erkennung.
-    // Host-Header explizit, damit der Server den richtigen vHost auswählt.
-    // AT+HTTPPARA="USERDATA" hängt beliebige HTTP-Header an
-    // (SIM7670-Befehlssatz, \\r\\n als Header-Trenner im AT-Befehl).
-    // Befehl ist >76 Bytes → RX-ISR während TX deaktivieren (Bit-Korruptionsschutz).
-    {
-      char hdCmd[256];
-      snprintf(hdCmd, sizeof(hdCmd),
-               "AT+HTTPPARA=\"USERDATA\",\"User-Agent: Mozilla/5.0 "
-               "(Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-               "\\r\\nHost: %s"
-               "\\r\\nAccept: application/json\"",
-               httpHost);
-
-      delay(30);
-      while (lteSerial.available()) lteSerial.read();
-
-      if (DEBUG) { Serial.print(F(">> ")); Serial.println(hdCmd); }
-
-      lteSerial.enableRx(false);
-      lteSerial.println(hdCmd);
-      lteSerial.enableRx(true);
-
-      resp = "";
-      long t0 = millis();
-      while (millis() - t0 < 3000) {
-        while (lteSerial.available()) resp += (char)lteSerial.read();
-        if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) break;
-        yield();
-      }
-      if (DEBUG) { Serial.print(F("USERDATA: ")); Serial.println(resp); }
-    }
-
-    // Redirect-Following aktivieren – manche CDNs leiten um (301/302).
-    // Falls der Befehl nicht unterstützt wird → ERROR, schadet nicht.
-    sendAT("AT+HTTPPARA=\"REDIR\",\"1\"", 2000);
-
-    // GET-Request senden und +HTTPACTION-URC in statischen char-Puffer einlesen.
-    // Kein String, kein realloc() – kein Heap-Stress in der kritischen Wartephase.
-    int httpLen = 0;
-    bool http200 = false;
-    {
-      static char urcBuf[128];
-      int urcLen = 0;
-      memset(urcBuf, 0, sizeof(urcBuf));
-
-      delay(30);
-      while (lteSerial.available()) lteSerial.read();
-      lteSerial.println(F("AT+HTTPACTION=0"));
-      if (DEBUG) Serial.println(F(">> AT+HTTPACTION=0"));
-
-      long tWait = millis();
-      while (millis() - tWait < 35000) {
-        while (lteSerial.available() && urcLen < (int)(sizeof(urcBuf) - 1)) {
-          urcBuf[urcLen++] = (char)lteSerial.read();
-          urcBuf[urcLen]   = '\0';
-        }
-        // Vollständige URC: "+HTTPACTION:" + 2 Kommas + Newline
-        char* hPtr = strstr(urcBuf, "+HTTPACTION:");
-        if (hPtr) {
-          char* c1 = strchr(hPtr, ',');
-          char* c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
-          if (c2 && strchr(c2 + 1, '\n')) break;
-        }
-        if (urcLen >= (int)(sizeof(urcBuf) - 10)) break; // Pufferschutz
-        ESP.wdtFeed();
-        delay(100);
-        yield();
-      }
-      if (DEBUG) { Serial.print(F("HTTPACTION: ")); Serial.println(urcBuf); }
-
-      // HTTP 200 prüfen
-      http200 = (strstr(urcBuf, ",200,") != nullptr);
-
-      if (http200) {
-        // Länge aus ",200,<len>" extrahieren
-        char* lenPtr = strstr(urcBuf, ",200,");
-        httpLen = lenPtr ? atoi(lenPtr + 5) : 0;
-      } else {
-        if (DEBUG) {
-          Serial.print(F("HTTP-Fehler (API "));
-          Serial.print(api);
-          Serial.println(F(")"));
-        }
-        sendAT("AT+HTTPTERM", 1000);
-        delay(500);
-        continue;   // → nächster API-Endpunkt
-      }
-    }
-
-    // Antwortlänge auf Puffergrösse begrenzen
-    if (httpLen <= 0 || httpLen > (int)(sizeof(body) - 1)) httpLen = sizeof(body) - 1;
-
-    // Antwort-Body in statischen char-Buffer lesen.
-    // Modul sendet: OK\r\n  +HTTPREAD: <len>\r\n  <Daten>  OK\r\n
-    {
-      delay(30);
-      while (lteSerial.available()) lteSerial.read();
-      lteSerial.print(F("AT+HTTPREAD=0,"));
-      lteSerial.println(httpLen);
-      if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
-
-      long t0 = millis();
-      bool httpReadSeen = false;
-      int  httpReadPos  = 0;
-
-      while (millis() - t0 < 30000) {
-        while (lteSerial.available() && bodyLen < (int)(sizeof(body) - 1)) {
-          body[bodyLen++] = (char)lteSerial.read();
-          body[bodyLen]   = '\0';
-        }
-        if (!httpReadSeen) {
-          char* p = strstr(body, "+HTTPREAD:");
-          if (p) { httpReadSeen = true; httpReadPos = (int)(p - body); }
-        }
-        if (httpReadSeen && strstr(body + httpReadPos, "OK\r")) break;
-        if (strstr(body, "ERROR")) break;
-        yield();
-      }
-      if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
-    }
-
-    // HTTP-Stack beenden
-    sendAT("AT+HTTPTERM", 1000);
-
-    gotData = (bodyLen >= 10);
-
-    if (gotData && DEBUG) {
-      Serial.print(F("Daten empfangen von API "));
-      Serial.println(api);
-    }
+  if (!lteClient.connect(httpHost, 443)) {
+    if (DEBUG) Serial.println(F("TCP-Verbindung fehlgeschlagen"));
+    tft.setTextColor(ST7735_YELLOW);
+    tft.println("TCP Fehler");
+    tft.setTextColor(ST7735_WHITE);
+    lteClient.stop();
+    secondTick.attach(1, ISRwatchDog);
+    return;
   }
-  // ---------------------------------------------------------------
-  // Ende der API-Schleife
-  // ---------------------------------------------------------------
+  if (DEBUG) Serial.println(F("TCP OK, starte TLS..."));
 
-  // Eigenen Watchdog wieder aktivieren
+  // --- BearSSL-TLS über die TCP-Verbindung ---
+  ESP_SSLClient sslClient;
+  sslClient.setInsecure();             // Zertifikat nicht prüfen (spart RAM)
+  sslClient.setBufferSizes(4096, 512); // RX 4 KB für Zertifikats-Chain
+  sslClient.setClient(&lteClient);
+
+  if (!sslClient.connect(httpHost, 443)) {
+    if (DEBUG) Serial.println(F("TLS-Handshake fehlgeschlagen"));
+    tft.setTextColor(ST7735_YELLOW);
+    tft.println("TLS Fehler");
+    tft.setTextColor(ST7735_WHITE);
+    sslClient.stop();
+    secondTick.attach(1, ISRwatchDog);
+    return;
+  }
+  if (DEBUG) {
+    Serial.println(F("TLS OK, sende HTTP GET..."));
+    Serial.print(F("Freier Heap nach TLS: "));
+    Serial.println(ESP.getFreeHeap());
+  }
+
+  // --- HTTP GET Request senden ---
+  sslClient.print(F("GET "));
+  sslClient.print(httpPath);
+  sslClient.println(F(" HTTP/1.1"));
+  sslClient.print(F("Host: "));
+  sslClient.println(httpHost);
+  sslClient.println(F("Accept: application/json"));
+  sslClient.println(F("Connection: close"));
+  sslClient.println();
+
+  // --- HTTP-Header überspringen (bis \r\n\r\n) ---
+  if (DEBUG) Serial.println(F("Warte auf Antwort..."));
+  int nlCount = 0;
+  bool headersDone = false;
+  unsigned long t0 = millis();
+
+  while (sslClient.connected() && millis() - t0 < 30000) {
+    if (sslClient.available()) {
+      char c = sslClient.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        nlCount++;
+        if (nlCount >= 2) { headersDone = true; break; }
+      } else {
+        nlCount = 0;
+      }
+    }
+    ESP.wdtFeed();
+    yield();
+  }
+
+  // --- HTTP-Body lesen ---
+  if (headersDone) {
+    t0 = millis();
+    while (sslClient.connected() && millis() - t0 < 15000) {
+      while (sslClient.available() && bodyLen < (int)(sizeof(body) - 1)) {
+        body[bodyLen++] = sslClient.read();
+      }
+      if (!sslClient.available() && bodyLen > 0) {
+        // Kurz warten ob noch Daten kommen
+        delay(200);
+        if (!sslClient.available()) break;
+      }
+      ESP.wdtFeed();
+      yield();
+    }
+    body[bodyLen] = '\0';
+    success = (bodyLen >= 10);
+  }
+
+  sslClient.stop();
+
+  if (DEBUG) {
+    Serial.print(F("Body ("));
+    Serial.print(bodyLen);
+    Serial.println(F(" Bytes):"));
+    Serial.println(body);
+  }
+
+  // Watchdog wieder aktivieren
   secondTick.attach(1, ISRwatchDog);
 
-  if (!gotData) {
-    if (DEBUG) Serial.println(F("Alle APIs fehlgeschlagen – Abbruch"));
+  if (!success) {
+    if (DEBUG) Serial.println(F("Keine gültige Antwort erhalten"));
     tft.setTextColor(ST7735_YELLOW);
     tft.println("Kurs-Fehler");
     tft.setTextColor(ST7735_WHITE);
@@ -283,8 +413,7 @@ void catchCurrencies() {
   // -------------------------------------------------------
   // JSON parsen mit strstr/atof – kein String-Objekt nötig.
   // fxSym[0]="CHF", fxSym[1]="USD", fxSym[2]="EUR", fxSym[3]="GBP"
-  // Beide APIs liefern CHF, USD, GBP relativ zu EUR im Format "KEY":value
-  // innerhalb eines "rates":{...} Objekts.
+  // API liefert CHF, USD, GBP relativ zu EUR.
   // EUR selbst nicht in Antwort → 1.0 gesetzt.
   // -------------------------------------------------------
   for (int i = 0; i < 4; i++) {
@@ -309,7 +438,6 @@ void catchCurrencies() {
   }
 
   // Umrechnung: CHF/Währung = CHF/EUR ÷ Währung/EUR
-  // Ergebnis: wie viele CHF pro 1 USD/EUR/GBP
   for (int l = 1; l < 4; l++) {
     if (fxValue[l] > 0.0) {
       fxValue[l] = fxValue[0] / fxValue[l];
@@ -325,5 +453,5 @@ void catchCurrencies() {
     }
   }
 
-  if (DEBUG) Serial.println("=== catchCurrencies Ende ===");
+  if (DEBUG) Serial.println(F("=== catchCurrencies Ende ==="));
 }
