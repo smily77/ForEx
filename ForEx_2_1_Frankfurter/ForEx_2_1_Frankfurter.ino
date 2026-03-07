@@ -1,4 +1,4 @@
-// ForEx_2_1 – GSM/LTE Version
+// ForEx_2_1_Frankfurter – GSM/LTE Version mit frankfurter.app API
 // Hardware:  ESP8266 + ST7735 TFT + BK-7670 LTE-Modul (AND Global)
 // Änderungen gegenüber v1.1:
 //   - WiFi entfernt; Datenverbindung über BK-7670 LTE-Modul (UART)
@@ -157,7 +157,7 @@ void setup() {
 
   // LTE-Modul starten
   lteSerial.begin(LTE_BAUD);
-  tft.println("ForEx v2.1");
+  tft.println("ForEx v2.1-FR");
   tft.println("LTE Init...");
   tft.print("Provider: ");
   tft.println(PROVIDER_NAME);
