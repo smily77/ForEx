@@ -348,7 +348,7 @@ void catchCurrencies() {
   sslClient.println(httpHost);
   sslClient.println(F("Accept: application/json"));
   sslClient.println(F("Connection: close"));
-  sslClient.println();
+  sslClient.print("\r\n");
 
   // --- HTTP-Header überspringen (bis \r\n\r\n) ---
   if (DEBUG) Serial.println(F("Warte auf Antwort..."));
