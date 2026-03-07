@@ -40,7 +40,7 @@ const char* AIRPORT_CODES[7] = {
 //   0 = M-Budget Mobile  (MVNO auf Swisscom-Netz)
 //   1 = Digital Republic (MVNO auf Salt-Netz)
 // ============================================================
-#define ACTIVE_PROVIDER  1          // <-- HIER PROVIDER EINSTELLEN
+#define ACTIVE_PROVIDER  0          // <-- HIER PROVIDER EINSTELLEN
 
 #if ACTIVE_PROVIDER == 0
   // M-Budget Mobile – läuft auf dem Swisscom-Netz
