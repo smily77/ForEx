@@ -163,7 +163,7 @@ void catchCurrencies() {
     bool httpReadSeen = false;
     int  httpReadPos  = 0;
 
-    while (millis() - t0 < 20000) {
+    while (millis() - t0 < 30000) {
       while (lteSerial.available() && bodyLen < (int)(sizeof(body) - 1)) {
         body[bodyLen++] = (char)lteSerial.read();
         body[bodyLen]   = '\0';
