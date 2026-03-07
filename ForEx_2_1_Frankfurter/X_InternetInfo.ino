@@ -15,6 +15,8 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Freier Endpunkt, kein API-Key nötig.
 // Liefert NUR die angefragten Währungen → sehr kompakte Antwort (~120 Bytes).
 // httpLen auf 400 gesetzt (grosszügiger Puffer).
+// AT+HTTPPARA="USERDATA" setzt User-Agent + Accept-Header – nötig damit
+// Cloudflare den Request nicht als Bot-Traffic blockiert.
 // Antwort-Beispiel:
 //   {"amount":1.0,"base":"EUR","date":"2026-03-06",
 //    "rates":{"CHF":0.956,"GBP":0.857,"USD":1.085}}
@@ -89,6 +91,12 @@ void catchCurrencies() {
       if (DEBUG) Serial.println(F("URL-Param fehlgeschlagen"));
     }
   }
+
+  // User-Agent + Accept-Header setzen – Cloudflare blockt Requests ohne plausiblen
+  // User-Agent als Bot-Traffic. AT+HTTPPARA="USERDATA" hängt beliebige HTTP-Header
+  // an (SIM7670-Befehlssatz, \r\n als Header-Trenner).
+  resp = sendAT("AT+HTTPPARA=\"USERDATA\",\"User-Agent: Mozilla/5.0\\r\\nAccept: application/json\"", 2000);
+  if (DEBUG) Serial.println("USERDATA: " + resp);
 
   // GET-Request senden (0 = GET).
   // Das Modul antwortet zuerst mit "OK" (Befehl akzeptiert), danach asynchron
