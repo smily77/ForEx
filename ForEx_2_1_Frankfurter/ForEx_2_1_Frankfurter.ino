@@ -65,7 +65,7 @@ const char* AIRPORT_CODES[7] = {
 #define LTE_TX_PIN   5      // ESP8266 TX → Modul RX
 #define LTE_BAUD  19200
 
-SoftwareSerial lteSerial(LTE_RX_PIN, LTE_TX_PIN);
+SoftwareSerial lteSerial(LTE_RX_PIN, LTE_TX_PIN, false, 256); // 256-Byte ISR-Puffer
 
 // ============================================================
 // TFT-DISPLAY: ST7735 160×128 px

@@ -98,74 +98,55 @@ void catchCurrencies() {
     }
   }
 
-  // GET-Request senden (0 = GET).
-  // Das Modul antwortet zuerst mit "OK" (Befehl akzeptiert), danach asynchron
-  // mit "+HTTPACTION: 0,<status>,<len>\r\n". sendATwait bricht bei Teilempfang
-  // von "+HTTPACTION:" ab – daher warten wir explizit auf die komplette Zeile.
-  resp = sendAT("AT+HTTPACTION=0", 5000);
-
-  // Warten auf vollständige URC-Zeile: +HTTPACTION: 0,200,123\r\n
-  // Abbruch erst wenn BEIDE Kommas und ein Newline dahinter vorhanden sind.
-  {
-    long tWait = millis();
-    while (millis() - tWait < 30000) {
-      while (lteSerial.available()) resp += (char)lteSerial.read();
-      int hIdx = resp.indexOf("+HTTPACTION:");
-      if (hIdx != -1) {
-        int c1 = resp.indexOf(',', hIdx);
-        int c2 = (c1 != -1) ? resp.indexOf(',', c1 + 1) : -1;
-        if (c2 != -1 && resp.indexOf('\n', c2) != -1) break; // vollständige Zeile
-      }
-      delay(200);
-      yield();
-    }
-  }
-
-  if (DEBUG) Serial.println("HTTPACTION Response: " + resp);
-
-  // HTTP-Statuscode prüfen (200 = OK)
-  if (resp.indexOf(",200,") == -1) {
-    if (DEBUG) {
-      Serial.println("HTTP-Fehler: " + resp);
-      // Antwort-Body lesen und ausgeben – zeigt was der Server zurückgibt
-      delay(30);
-      while (lteSerial.available()) lteSerial.read();
-      lteSerial.println(F("AT+HTTPREAD=0,200"));
-      Serial.println(F(">> AT+HTTPREAD=0,200"));
-      // Modul sendet zuerst "OK\r\n" (Befehlsbestätigung), danach erst
-      // "+HTTPREAD: <len>\r\n<Daten>OK\r\n". Erst nach dem +HTTPREAD-Header
-      // auf das finale OK warten, sonst wird die Bestätigung als Ende erkannt.
-      String errBody = "";
-      long t0 = millis();
-      int errReadAt = -1;
-      while (millis() - t0 < 5000) {
-        while (lteSerial.available()) errBody += (char)lteSerial.read();
-        if (errReadAt < 0) errReadAt = errBody.indexOf("+HTTPREAD:");
-        if (errReadAt >= 0 && errBody.indexOf("OK\r", errReadAt) != -1) break;
-        if (errBody.indexOf("ERROR") != -1) break;
-        yield();
-      }
-      Serial.println("Fehler-Body: " + errBody);
-    }
-    tft.setTextColor(ST7735_YELLOW);
-    tft.println("HTTP Fehler");
-    tft.setTextColor(ST7735_WHITE);
-    sendAT("AT+HTTPTERM", 1000);
-    secondTick.attach(1, ISRwatchDog);
-    return;
-  }
-
-  // Datenlänge aus +HTTPACTION: 0,200,<len> extrahieren
+  // GET-Request senden und +HTTPACTION-URC in statischen char-Puffer einlesen.
+  // Kein String, kein realloc() – kein Heap-Stress in der kritischen Wartephase.
   int httpLen = 0;
   {
-    int lastComma = resp.lastIndexOf(",");
-    if (lastComma != -1) {
-      httpLen = resp.substring(lastComma + 1).toInt();
+    static char urcBuf[128];
+    int urcLen = 0;
+    memset(urcBuf, 0, sizeof(urcBuf));
+
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(F("AT+HTTPACTION=0"));
+    if (DEBUG) Serial.println(F(">> AT+HTTPACTION=0"));
+
+    long tWait = millis();
+    while (millis() - tWait < 35000) {
+      while (lteSerial.available() && urcLen < (int)(sizeof(urcBuf) - 1)) {
+        urcBuf[urcLen++] = (char)lteSerial.read();
+        urcBuf[urcLen]   = '\0';
+      }
+      // Vollständige URC: "+HTTPACTION:" + 2 Kommas + Newline
+      char* hPtr = strstr(urcBuf, "+HTTPACTION:");
+      if (hPtr) {
+        char* c1 = strchr(hPtr, ',');
+        char* c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
+        if (c2 && strchr(c2 + 1, '\n')) break;
+      }
+      if (urcLen >= (int)(sizeof(urcBuf) - 10)) break; // Pufferschutz
+      ESP.wdtFeed();
+      delay(100);
+      yield();
     }
+    if (DEBUG) { Serial.print(F("HTTPACTION: ")); Serial.println(urcBuf); }
+
+    // HTTP 200 prüfen
+    if (!strstr(urcBuf, ",200,")) {
+      if (DEBUG) Serial.println(F("HTTP-Fehler oder Timeout"));
+      tft.setTextColor(ST7735_YELLOW);
+      tft.println("HTTP Fehler");
+      tft.setTextColor(ST7735_WHITE);
+      sendAT("AT+HTTPTERM", 1000);
+      secondTick.attach(1, ISRwatchDog);
+      return;
+    }
+
+    // Länge aus ",200,<len>" extrahieren
+    char* lenPtr = strstr(urcBuf, ",200,");
+    httpLen = lenPtr ? atoi(lenPtr + 5) : 0;
   }
-  // exchangerate-api.com liefert alle Währungen (~2500 Bytes bis USD).
-  // Fallback: wenn Server weniger meldet, das Gemeldete lesen; wenn mehr, auf 2500 kappen.
-  // Puffer-Obergrenze: sizeof(body)-1 = 2599 Bytes.
+
   if (httpLen <= 0 || httpLen > (int)(sizeof(body) - 1)) httpLen = sizeof(body) - 1;
 
   // Antwort-Body in statischen char-Buffer lesen.
