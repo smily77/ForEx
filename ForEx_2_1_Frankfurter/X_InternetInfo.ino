@@ -423,8 +423,9 @@ void catchCurrencies() {
       if (p) {
         p += strlen(key);
         fxValue[i] = atof(p);
+      } else {
+        fxValue[i] = 0.0;
       }
-      // Kein else: alten Wert behalten wenn Währung nicht in Antwort
     } else {
       fxValue[i] = 1.0;
     }
