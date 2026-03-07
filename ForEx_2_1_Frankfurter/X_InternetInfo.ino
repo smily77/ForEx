@@ -43,6 +43,7 @@ public:
     _rxLen = 0;
     _rxPos = 0;
     _lastPoll = 0;
+    if (DEBUG) { Serial.print(F("Heap vor connect: ")); Serial.println(ESP.getFreeHeap()); }
 
     // Buffered-Receive: Modul puffert eingehende TCP-Daten,
     // kein unerwartetes Daten-Dump auf UART.
@@ -110,6 +111,7 @@ public:
         if (lteSerial.read() == '>') { gotPrompt = true; break; }
       }
       if (gotPrompt) break;
+      ESP.wdtFeed();
       yield();
     }
     if (!gotPrompt) { _connected = false; return 0; }
@@ -127,12 +129,14 @@ public:
     lteSerial.enableRx(true);
 
     // +CIPSEND Bestätigung abwarten
-    String resp = "";
+    String resp;
+    resp.reserve(64);
     t0 = millis();
     while (millis() - t0 < 10000) {
       while (lteSerial.available()) resp += (char)lteSerial.read();
       if (resp.indexOf("+CIPSEND:") != -1) break;
       if (resp.indexOf("ERROR") != -1) { _connected = false; return 0; }
+      ESP.wdtFeed();
       yield();
     }
     return toSend;
@@ -213,7 +217,7 @@ public:
 
 private:
   bool _connected = false;
-  uint8_t _rxBuf[512];          // Lokaler Empfangspuffer
+  static uint8_t _rxBuf[256];   // Statischer Empfangspuffer (spart Stack)
   int _rxLen = 0;               // Gültige Bytes im Puffer
   int _rxPos = 0;               // Aktuelle Leseposition
   unsigned long _lastPoll = 0;  // Letzte Modul-Abfrage (Throttle)
@@ -235,7 +239,8 @@ private:
     lteSerial.println(cmd);
 
     // Header lesen: +CIPRXGET: 2,0,<actual>,<remaining>\r\n
-    String header = "";
+    String header;
+    header.reserve(64);
     bool gotHeader = false;
     unsigned long t0 = millis();
     while (millis() - t0 < 5000) {
@@ -248,6 +253,7 @@ private:
         }
       }
       if (gotHeader) break;
+      ESP.wdtFeed();
       yield();
     }
     if (!gotHeader) return;
@@ -266,6 +272,7 @@ private:
         _rxBuf[_rxLen++] = lteSerial.read();
       }
       if (_rxLen >= actual) break;
+      ESP.wdtFeed();
       yield();
     }
 
@@ -274,6 +281,9 @@ private:
     while (lteSerial.available()) lteSerial.read();
   }
 };
+
+// Statische Member-Definition
+uint8_t LTEClient::_rxBuf[256];
 
 // ============================================================
 // WECHSELKURSE ABRUFEN
@@ -304,7 +314,7 @@ void catchCurrencies() {
   bool success = false;
 
   // --- TCP-Verbindung über LTEClient öffnen ---
-  LTEClient lteClient;
+  static LTEClient lteClient;  // static: nicht auf dem Stack (spart ~50 Bytes)
 
   if (DEBUG) Serial.println(F("TCP-Verbindung aufbauen..."));
 

@@ -13,7 +13,8 @@ String sendAT(const String& cmd, int timeout = 1000) {
   while (lteSerial.available()) lteSerial.read();     // Puffer leeren
   lteSerial.println(cmd);
 
-  String response = "";
+  String response;
+  response.reserve(128);  // Heap-Fragmentierung vermeiden
   long tStart = millis();
   while (millis() - tStart < timeout) {
     while (lteSerial.available()) {
@@ -21,7 +22,8 @@ String sendAT(const String& cmd, int timeout = 1000) {
     }
     // Früh beenden wenn OK oder ERROR empfangen
     if (response.indexOf("OK\r") != -1 || response.indexOf("ERROR") != -1) break;
-    yield();   // ESP8266 internen Software-Watchdog füttern
+    ESP.wdtFeed();  // Hardware-Watchdog füttern
+    yield();        // Software-Watchdog füttern
   }
 
   if (DEBUG) {
@@ -37,14 +39,16 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout = 5000) 
   while (lteSerial.available()) lteSerial.read();
   lteSerial.println(cmd);
 
-  String response = "";
+  String response;
+  response.reserve(128);  // Heap-Fragmentierung vermeiden
   long tStart = millis();
   while (millis() - tStart < timeout) {
     while (lteSerial.available()) {
       response += (char)lteSerial.read();
     }
     if (response.indexOf(waitFor) != -1) break;
-    yield();   // ESP8266 internen Software-Watchdog füttern
+    ESP.wdtFeed();  // Hardware-Watchdog füttern
+    yield();        // Software-Watchdog füttern
   }
 
   if (DEBUG) {
