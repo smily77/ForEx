@@ -14,6 +14,7 @@
 #include <Adafruit_ST7735.h>
 #include <Streaming.h>
 #include <Ticker.h>
+#include <ESP_SSLClient.h>     // BearSSL-TLS über beliebigen Arduino Client
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold18pt7b.h>
 #include "AirportDatabase.h"
@@ -159,7 +160,7 @@ void setup() {
 
   // LTE-Modul starten
   lteSerial.begin(LTE_BAUD, SWSERIAL_8N1, LTE_RX_PIN, LTE_TX_PIN, false, 256); // 256-Byte ISR-Puffer
-  tft.println("ForEx v2.1-FR");
+  tft.println("ForEx v2.1-FR-SSL");
   tft.println("LTE Init...");
   tft.print("Provider: ");
   tft.println(PROVIDER_NAME);
