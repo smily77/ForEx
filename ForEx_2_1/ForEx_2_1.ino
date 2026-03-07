@@ -17,6 +17,7 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold18pt7b.h>
 #include "AirportDatabase.h"
+#include "Credentials.h"      // SIM-PIN (nicht auf GitHub)
 
 #define DEBUG true
 
