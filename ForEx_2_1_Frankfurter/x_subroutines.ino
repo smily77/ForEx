@@ -88,8 +88,22 @@ bool initLTE() {
     if (resp.indexOf("SIM PIN") != -1 && strlen(GPSII_PIN) > 0) {
       tft.println("SIM PIN...");
       if (DEBUG) Serial.println("SIM PIN eingeben...");
+      // PIN senden – NICHT über sendAT(), damit die PIN nicht im Serial-Log erscheint
       String pinCmd = String(F("AT+CPIN=\"")) + GPSII_PIN + "\"";
-      String pinResp = sendAT(pinCmd, 5000);
+      delay(30);
+      while (lteSerial.available()) lteSerial.read();
+      lteSerial.println(pinCmd);
+      // Antwort abwarten
+      String pinResp;
+      pinResp.reserve(64);
+      long t0 = millis();
+      while (millis() - t0 < 5000) {
+        while (lteSerial.available()) pinResp += (char)lteSerial.read();
+        if (pinResp.indexOf("OK") != -1 || pinResp.indexOf("ERROR") != -1) break;
+        ESP.wdtFeed();
+        yield();
+      }
+      if (DEBUG) Serial.println(F("<< (PIN response hidden)"));
       if (pinResp.indexOf("OK") == -1) {
         if (DEBUG) Serial.println("FEHLER: PIN falsch!");
         tft.setTextColor(ST7735_RED);
