@@ -298,10 +298,8 @@ void catchCurrencies() {
     Serial.println(ESP.getFreeHeap());
   }
 
-  // Eigenen 60s-Watchdog während TLS pausieren
-  secondTick.detach();
-  watchDogCount     = 0;
-  watchDogTriggered = false;
+  // Watchdog läuft weiter (180s Timeout reicht für TLS)
+  watchDogCount = 0;
 
   // Statischer Puffer für HTTP-Antwort (frankfurter.app: ~120 Bytes)
   static char body[512];
@@ -320,7 +318,6 @@ void catchCurrencies() {
     tft.println("TCP Fehler");
     tft.setTextColor(ST7735_WHITE);
     lteClient.stop();
-    secondTick.attach(1, ISRwatchDog);
     return;
   }
   if (DEBUG) Serial.println(F("TCP OK, starte TLS..."));
@@ -337,7 +334,6 @@ void catchCurrencies() {
     tft.println("TLS Fehler");
     tft.setTextColor(ST7735_WHITE);
     sslClient.stop();
-    secondTick.attach(1, ISRwatchDog);
     return;
   }
   if (DEBUG) {
@@ -404,9 +400,6 @@ void catchCurrencies() {
     Serial.println(F(" Bytes):"));
     Serial.println(body);
   }
-
-  // Watchdog wieder aktivieren
-  secondTick.attach(1, ISRwatchDog);
 
   if (!success) {
     if (DEBUG) Serial.println(F("Keine gültige Antwort erhalten"));
