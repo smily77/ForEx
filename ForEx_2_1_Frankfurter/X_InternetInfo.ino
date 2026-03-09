@@ -19,11 +19,6 @@
 //                  → "ESP_SSLClient" suchen und installieren
 //     PlatformIO:  lib_deps = mobizt/ESP_SSLClient
 //
-// Forward-Deklarationen nötig, da Arduino .ino-Dateien alphabetisch
-// zusammengeführt werden und X_ vor x_subroutines kommt.
-String sendAT(const String& cmd, int timeout);
-String sendATwait(const String& cmd, const String& waitFor, int timeout);
-
 // ESP8266 SDK – CPU-Frequenz umschalten (80 ↔ 160 MHz)
 extern "C" {
   #include "user_interface.h"
@@ -49,7 +44,9 @@ class LTEClient : public Client {
 public:
 
   // --- Verbindung aufbauen ---
-  // connect() wird nur 1x pro Kursabruf aufgerufen → sendAT mit String OK
+  // KEINE String-Allokation! connect() läuft direkt vor dem TLS-Handshake.
+  // Jede String-Allokation hier fragmentiert den Heap und kann dazu führen,
+  // dass BearSSL's malloc() NULL zurückgibt → Exception (28).
   int connect(const char *host, uint16_t port) override {
     _connected = false;
     _rxLen = 0;
@@ -57,32 +54,27 @@ public:
     _lastPoll = 0;
     if (DEBUG) { Serial.print(F("Heap vor connect: ")); Serial.println(ESP.getFreeHeap()); }
 
-    // Buffered-Receive: Modul puffert eingehende TCP-Daten,
-    // kein unerwartetes Daten-Dump auf UART.
-    sendAT("AT+CIPRXGET=1", 2000);
-
-    // Alte Verbindungen aufräumen
-    sendAT("AT+CIPCLOSE=0", 2000);
-    sendAT("AT+NETCLOSE", 5000);
+    // Alle AT-Befehle mit statischen Puffern – kein String/Heap
+    _sendATraw(F("AT+CIPRXGET=1"), 2000);
+    _sendATraw(F("AT+CIPCLOSE=0"), 2000);
+    _sendATraw(F("AT+NETCLOSE"), 5000);
     delay(500);
 
-    // PDP-Kontext 1 verwenden (gleicher wie in initLTE/CGACT)
-    sendAT("AT+CSOCKSETPN=1", 1000);
-    sendAT("AT+CIPMODE=0", 1000);   // Non-Transparent-Modus
+    _sendATraw(F("AT+CSOCKSETPN=1"), 1000);
+    _sendATraw(F("AT+CIPMODE=0"), 1000);
 
-    // Netzwerk-Socket-Dienst starten
-    String resp = sendATwait("AT+NETOPEN", "OK", 15000);
-    delay(1000);  // Modul braucht Zeit zum Öffnen des Netzwerk-Sockets
+    _sendATraw(F("AT+NETOPEN"), 15000);
+    delay(1000);
 
-    // TCP-Verbindung öffnen
-    char cmd[128];
+    // TCP-Verbindung öffnen (einziger dynamischer Befehl → _sendATcmd)
+    char cmd[80];
     snprintf(cmd, sizeof(cmd),
              "AT+CIPOPEN=0,\"TCP\",\"%s\",%d", host, port);
-    resp = sendATwait(String(cmd), "+CIPOPEN: 0,0", 20000);
+    _sendATcmd(cmd, 20000, "+CIPOPEN: 0,0");
 
-    // +CIPOPEN: 0,0 = Link 0, Ergebnis 0 (Erfolg)
-    if (resp.indexOf("+CIPOPEN: 0,0") != -1) {
+    if (strstr(_atBuf, "+CIPOPEN: 0,0") != NULL) {
       _connected = true;
+      if (DEBUG) { Serial.print(F("Heap nach connect: ")); Serial.println(ESP.getFreeHeap()); }
       return 1;
     }
     return 0;
@@ -220,9 +212,9 @@ public:
   void flush() override { }
 
   void stop() override {
-    sendAT("AT+CIPCLOSE=0", 5000);
+    _sendATraw(F("AT+CIPCLOSE=0"), 5000);
     delay(500);
-    sendAT("AT+NETCLOSE", 5000);
+    _sendATraw(F("AT+NETCLOSE"), 5000);
     _connected = false;
     _rxLen = 0;
     _rxPos = 0;
@@ -238,15 +230,16 @@ private:
   int _rxPos = 0;               // Aktuelle Leseposition
   unsigned long _lastPoll = 0;  // Letzte Modul-Abfrage (Throttle)
 
-  // Statischer AT-Antwortpuffer – wird von allen Hot-Path-Methoden geteilt.
+  // Statischer AT-Antwortpuffer – wird von allen Methoden geteilt.
+  // 128 Bytes: genug für CIPOPEN-Echo (~55 Bytes) + Antwort.
   // Kein Reentrancy-Problem da ESP8266 single-threaded ist.
-  static char _atBuf[96];
+  static char _atBuf[128];
 
-  // AT-Befehl senden und Antwort in _atBuf lesen – KEINE Heap-Allokation.
-  // Für die Hot-Path-Methoden (available/read/write) während BearSSL.
+  // AT-Befehl senden (F-String) und Antwort in _atBuf lesen.
+  // Wartet auf "OK" oder "ERROR". KEINE Heap-Allokation.
   void _sendATraw(const __FlashStringHelper* cmd, unsigned long timeout) {
     int len = 0;
-    delay(10);  // 10ms reicht für einfache AT-Queries (statt 30ms)
+    delay(10);
     while (lteSerial.available()) lteSerial.read();
     lteSerial.println(cmd);
 
@@ -257,6 +250,32 @@ private:
       }
       _atBuf[len] = '\0';
       if (strstr(_atBuf, "OK\r") || strstr(_atBuf, "ERROR")) break;
+      ESP.wdtFeed();
+      yield();
+    }
+    _atBuf[len] = '\0';
+  }
+
+  // AT-Befehl senden (C-String) mit optionalem waitFor-Keyword.
+  // Für connect()/stop() – dynamische Befehle wie AT+CIPOPEN.
+  void _sendATcmd(const char* cmd, unsigned long timeout, const char* waitFor = nullptr) {
+    int len = 0;
+    delay(10);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(cmd);
+
+    unsigned long t0 = millis();
+    while (millis() - t0 < timeout && len < (int)sizeof(_atBuf) - 1) {
+      while (lteSerial.available() && len < (int)sizeof(_atBuf) - 1) {
+        _atBuf[len++] = (char)lteSerial.read();
+      }
+      _atBuf[len] = '\0';
+      if (waitFor) {
+        if (strstr(_atBuf, waitFor)) break;
+      } else {
+        if (strstr(_atBuf, "OK\r")) break;
+      }
+      if (strstr(_atBuf, "ERROR")) break;
       ESP.wdtFeed();
       yield();
     }
@@ -328,7 +347,7 @@ private:
 
 // Statische Member-Definitionen
 uint8_t LTEClient::_rxBuf[256];
-char    LTEClient::_atBuf[96];
+char    LTEClient::_atBuf[128];
 
 // ============================================================
 // WECHSELKURSE ABRUFEN
@@ -354,8 +373,10 @@ void catchCurrencies() {
   // Weniger CPU-Zeit in Bignum-Loops = weniger SoftwareSerial-ISR-Störungen.
   system_update_cpu_freq(160);
 
-  // Heap-Guard: BearSSL braucht ~15-20 KB für TLS-Handshake
-  if (ESP.getFreeHeap() < 15000) {
+  // Heap-Guard: BearSSL braucht ~20 KB für TLS-Handshake
+  // (SSL-Kontext ~6 KB + IO-Puffer 2.5 KB + Bignum-Workspace ~8 KB + Stack)
+  // Bei 15568 Bytes kam Exception (28) = NULL-Pointer von malloc().
+  if (ESP.getFreeHeap() < 22000) {
     if (DEBUG) Serial.println(F("ABBRUCH: Heap zu niedrig fuer TLS!"));
     tft.setTextColor(ST7735_YELLOW);
     tft.println("Heap zu niedrig");
