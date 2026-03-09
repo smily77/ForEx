@@ -373,10 +373,11 @@ void catchCurrencies() {
   // Weniger CPU-Zeit in Bignum-Loops = weniger SoftwareSerial-ISR-Störungen.
   system_update_cpu_freq(160);
 
-  // Heap-Guard: BearSSL braucht ~20 KB für TLS-Handshake
-  // (SSL-Kontext ~6 KB + IO-Puffer 2.5 KB + Bignum-Workspace ~8 KB + Stack)
-  // Bei 15568 Bytes kam Exception (28) = NULL-Pointer von malloc().
-  if (ESP.getFreeHeap() < 22000) {
+  // Heap-Guard: BearSSL braucht ~12 KB für TLS-Handshake bei ECDHE
+  // (SSL-Kontext ~4 KB + IO-Puffer 2.5 KB + ECDHE-Workspace ~2 KB + Cert ~3 KB)
+  // Crash bei 15568 war wegen Heap-FRAGMENTIERUNG (String), nicht Gesamtmenge.
+  // Jetzt ohne Strings → unfragmentierter Heap → 18 KB reichen sicher.
+  if (ESP.getFreeHeap() < 18000) {
     if (DEBUG) Serial.println(F("ABBRUCH: Heap zu niedrig fuer TLS!"));
     tft.setTextColor(ST7735_YELLOW);
     tft.println("Heap zu niedrig");
