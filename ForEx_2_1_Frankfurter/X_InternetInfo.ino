@@ -31,6 +31,12 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 // Implementiert das Arduino-Client-Interface, damit ESP_SSLClient
 // (BearSSL) darauf aufsetzen kann.
 //
+// WICHTIG: Alle Methoden die von BearSSL im TLS-Handshake aufgerufen
+// werden (write/available/read) verwenden statische char-Puffer statt
+// String-Objekte, um Heap-Fragmentierung zu vermeiden.
+// BearSSL ruft available() hunderte Male auf – jede String-Allokation
+// dort würde den Heap nach wenigen Handshakes zerstören.
+//
 // AT-Befehlssatz: NETOPEN / CIPOPEN / CIPSEND / CIPRXGET / CIPCLOSE
 // Referenz: A76XX Series TCPIP Application Note (SIMCom)
 // ============================================================
@@ -38,6 +44,7 @@ class LTEClient : public Client {
 public:
 
   // --- Verbindung aufbauen ---
+  // connect() wird nur 1x pro Kursabruf aufgerufen → sendAT mit String OK
   int connect(const char *host, uint16_t port) override {
     _connected = false;
     _rxLen = 0;
@@ -59,7 +66,6 @@ public:
     sendAT("AT+CIPMODE=0", 1000);   // Non-Transparent-Modus
 
     // Netzwerk-Socket-Dienst starten
-    // Auf OK warten (NETOPEN: 0 kommt asynchron, aber OK reicht als Bestätigung)
     String resp = sendATwait("AT+NETOPEN", "OK", 15000);
     delay(1000);  // Modul braucht Zeit zum Öffnen des Netzwerk-Sockets
 
@@ -84,6 +90,8 @@ public:
   }
 
   // --- Daten senden ---
+  // HOT PATH: wird von BearSSL während TLS-Handshake aufgerufen.
+  // Verwendet statische Puffer statt String.
   size_t write(uint8_t b) override { return write(&b, 1); }
 
   size_t write(const uint8_t *buf, size_t size) override {
@@ -116,22 +124,22 @@ public:
     delay(10);
     while (lteSerial.available()) lteSerial.read();
 
-    // Binärdaten senden – RX-ISR deaktivieren (Bit-Korruptionsschutz,
-    // SoftwareSerial-TX ist auf ESP8266 nicht interrupt-sicher ab ~76 Bytes)
+    // Binärdaten senden – RX-ISR deaktivieren (Bit-Korruptionsschutz).
+    // Batch-Write statt Einzelbytes → kürzere RX-Pause, schneller.
     lteSerial.enableRx(false);
-    for (int i = 0; i < toSend; i++) {
-      lteSerial.write(buf[i]);
-    }
+    lteSerial.write(buf, toSend);
     lteSerial.enableRx(true);
 
-    // +CIPSEND Bestätigung abwarten
-    String resp;
-    resp.reserve(64);
+    // +CIPSEND Bestätigung abwarten – statischer Puffer statt String
+    int rLen = 0;
     t0 = millis();
-    while (millis() - t0 < 10000) {
-      while (lteSerial.available()) resp += (char)lteSerial.read();
-      if (resp.indexOf("+CIPSEND:") != -1) break;
-      if (resp.indexOf("ERROR") != -1) { _connected = false; return 0; }
+    while (millis() - t0 < 10000 && rLen < (int)sizeof(_atBuf) - 1) {
+      while (lteSerial.available() && rLen < (int)sizeof(_atBuf) - 1) {
+        _atBuf[rLen++] = (char)lteSerial.read();
+      }
+      _atBuf[rLen] = '\0';
+      if (strstr(_atBuf, "+CIPSEND:") != NULL) break;
+      if (strstr(_atBuf, "ERROR") != NULL) { _connected = false; return 0; }
       ESP.wdtFeed();
       yield();
     }
@@ -139,6 +147,8 @@ public:
   }
 
   // --- Daten empfangen ---
+  // HOT PATH: BearSSL pollt available() intensiv während TLS.
+  // Komplett ohne String/Heap-Allokation implementiert.
   int available() override {
     if (_rxPos < _rxLen) return _rxLen - _rxPos;
 
@@ -147,11 +157,12 @@ public:
     if (now - _lastPoll < 50) return 0;
     _lastPoll = now;
 
-    // Modul nach gepufferten Bytes fragen
-    String resp = sendAT("AT+CIPRXGET=4,0", 1000);
-    int idx = resp.indexOf("+CIPRXGET: 4,0,");
-    if (idx >= 0) {
-      int avail = resp.substring(idx + 15).toInt();
+    // Modul nach gepufferten Bytes fragen – statischer Puffer
+    _sendATraw(F("AT+CIPRXGET=4,0"), 1000);
+
+    char* idx = strstr(_atBuf, "+CIPRXGET: 4,0,");
+    if (idx) {
+      int avail = atoi(idx + 15);
       if (avail > 0) {
         _pullFromModule(avail);
         return _rxLen - _rxPos;
@@ -166,6 +177,7 @@ public:
     return -1;
   }
 
+  // HOT PATH: Verwendet statischen Puffer für AT-Abfrage
   int read(uint8_t *buf, size_t size) override {
     // Aus lokalem Puffer bedienen
     if (_rxPos < _rxLen) {
@@ -176,11 +188,12 @@ public:
       return n;
     }
 
-    // Puffer leer → vom Modul nachladen
-    String resp = sendAT("AT+CIPRXGET=4,0", 1000);
-    int idx = resp.indexOf("+CIPRXGET: 4,0,");
-    if (idx < 0) return 0;
-    int moduleAvail = resp.substring(idx + 15).toInt();
+    // Puffer leer → vom Modul nachladen (statischer Puffer)
+    _sendATraw(F("AT+CIPRXGET=4,0"), 1000);
+
+    char* idx = strstr(_atBuf, "+CIPRXGET: 4,0,");
+    if (!idx) return 0;
+    int moduleAvail = atoi(idx + 15);
     if (moduleAvail <= 0) return 0;
 
     _pullFromModule(moduleAvail);
@@ -218,8 +231,34 @@ private:
   int _rxPos = 0;               // Aktuelle Leseposition
   unsigned long _lastPoll = 0;  // Letzte Modul-Abfrage (Throttle)
 
+  // Statischer AT-Antwortpuffer – wird von allen Hot-Path-Methoden geteilt.
+  // Kein Reentrancy-Problem da ESP8266 single-threaded ist.
+  static char _atBuf[96];
+
+  // AT-Befehl senden und Antwort in _atBuf lesen – KEINE Heap-Allokation.
+  // Für die Hot-Path-Methoden (available/read/write) während BearSSL.
+  void _sendATraw(const __FlashStringHelper* cmd, unsigned long timeout) {
+    int len = 0;
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.println(cmd);
+
+    unsigned long t0 = millis();
+    while (millis() - t0 < timeout && len < (int)sizeof(_atBuf) - 1) {
+      while (lteSerial.available() && len < (int)sizeof(_atBuf) - 1) {
+        _atBuf[len++] = (char)lteSerial.read();
+      }
+      _atBuf[len] = '\0';
+      if (strstr(_atBuf, "OK\r") || strstr(_atBuf, "ERROR")) break;
+      ESP.wdtFeed();
+      yield();
+    }
+    _atBuf[len] = '\0';
+  }
+
   // Daten vom Modul in den lokalen Puffer lesen.
   // AT+CIPRXGET=2,0,<len> → +CIPRXGET: 2,0,<actual>,<remaining>\r\n<Daten>\r\nOK
+  // Verwendet statischen Header-Puffer statt String.
   void _pullFromModule(int moduleAvail) {
     _rxLen = 0;
     _rxPos = 0;
@@ -235,15 +274,17 @@ private:
     lteSerial.println(cmd);
 
     // Header lesen: +CIPRXGET: 2,0,<actual>,<remaining>\r\n
-    String header;
-    header.reserve(64);
+    // Statischer Puffer statt String – kein Heap-Allokation
+    static char hdr[80];
+    int hdrLen = 0;
     bool gotHeader = false;
     unsigned long t0 = millis();
-    while (millis() - t0 < 5000) {
-      while (lteSerial.available()) {
+    while (millis() - t0 < 5000 && hdrLen < (int)sizeof(hdr) - 1) {
+      while (lteSerial.available() && hdrLen < (int)sizeof(hdr) - 1) {
         char c = (char)lteSerial.read();
-        header += c;
-        if (header.endsWith("\n") && header.indexOf("+CIPRXGET: 2") >= 0) {
+        hdr[hdrLen++] = c;
+        hdr[hdrLen] = '\0';
+        if (c == '\n' && strstr(hdr, "+CIPRXGET: 2") != NULL) {
           gotHeader = true;
           break;
         }
@@ -255,9 +296,9 @@ private:
     if (!gotHeader) return;
 
     // Tatsächliche Datenlänge parsen
-    int idx = header.indexOf("+CIPRXGET: 2,0,");
-    if (idx < 0) return;
-    int actual = header.substring(idx + 15).toInt();
+    char* idx = strstr(hdr, "+CIPRXGET: 2,0,");
+    if (!idx) return;
+    int actual = atoi(idx + 15);
     if (actual <= 0) return;
     if (actual > (int)sizeof(_rxBuf)) actual = sizeof(_rxBuf);
 
@@ -278,8 +319,9 @@ private:
   }
 };
 
-// Statische Member-Definition
+// Statische Member-Definitionen
 uint8_t LTEClient::_rxBuf[256];
+char    LTEClient::_atBuf[96];
 
 // ============================================================
 // WECHSELKURSE ABRUFEN
@@ -298,8 +340,17 @@ void catchCurrencies() {
     Serial.println(ESP.getFreeHeap());
   }
 
-  // Watchdog läuft weiter (180s Timeout reicht für TLS)
+  // Watchdog-Zähler zurücksetzen (180s Timeout reicht für TLS)
   watchDogCount = 0;
+
+  // Heap-Guard: BearSSL braucht ~15-20 KB für TLS-Handshake
+  if (ESP.getFreeHeap() < 15000) {
+    if (DEBUG) Serial.println(F("ABBRUCH: Heap zu niedrig fuer TLS!"));
+    tft.setTextColor(ST7735_YELLOW);
+    tft.println("Heap zu niedrig");
+    tft.setTextColor(ST7735_WHITE);
+    return;
+  }
 
   // Statischer Puffer für HTTP-Antwort (frankfurter.app: ~120 Bytes)
   static char body[512];
@@ -323,10 +374,18 @@ void catchCurrencies() {
   if (DEBUG) Serial.println(F("TCP OK, starte TLS..."));
 
   // --- BearSSL-TLS über die TCP-Verbindung ---
-  ESP_SSLClient sslClient;
+  // Static: vermeidet wiederholte Konstruktion/Destruktion und Heap-Churn.
+  // BearSSL-Kontextstrukturen bleiben allokiert statt bei jedem Abruf
+  // neu angelegt und freigegeben zu werden (reduziert Fragmentierung).
+  static ESP_SSLClient sslClient;
   sslClient.setInsecure();             // Zertifikat nicht prüfen (spart RAM)
-  sslClient.setBufferSizes(4096, 512); // RX 4 KB für Zertifikats-Chain
+  sslClient.setBufferSizes(2048, 512); // RX 2 KB (statt 4 KB – spart Heap)
   sslClient.setClient(&lteClient);
+
+  if (DEBUG) {
+    Serial.print(F("Freier Heap vor TLS: "));
+    Serial.println(ESP.getFreeHeap());
+  }
 
   if (!sslClient.connect(httpHost, 443)) {
     if (DEBUG) Serial.println(F("TLS-Handshake fehlgeschlagen"));
@@ -402,7 +461,7 @@ void catchCurrencies() {
   }
 
   if (!success) {
-    if (DEBUG) Serial.println(F("Keine gültige Antwort erhalten"));
+    if (DEBUG) Serial.println(F("Keine gueltige Antwort erhalten"));
     tft.setTextColor(ST7735_YELLOW);
     tft.println("Kurs-Fehler");
     tft.setTextColor(ST7735_WHITE);

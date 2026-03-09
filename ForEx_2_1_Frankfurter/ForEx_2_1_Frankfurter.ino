@@ -160,7 +160,7 @@ void setup() {
   tft.setCursor(0, 0);
 
   // LTE-Modul starten
-  lteSerial.begin(LTE_BAUD, SWSERIAL_8N1, LTE_RX_PIN, LTE_TX_PIN, false, 256); // 256-Byte ISR-Puffer
+  lteSerial.begin(LTE_BAUD, SWSERIAL_8N1, LTE_RX_PIN, LTE_TX_PIN, false, 512); // 512-Byte ISR-Puffer (grösser wegen BearSSL-Interrupt-Latenz)
   tft.println("ForEx v2.1-FR-SSL");
   tft.println("LTE Init...");
   tft.print("Provider: ");
@@ -259,6 +259,10 @@ void loop() {
     if ((hour() == 17) && (minuteLast == 0)) {
       if (DEBUG) Serial.println(F("17:00 – Tägliche Aktualisierung..."));
 #endif
+      // Ticker pausieren: Timer-ISR kann SoftwareSerial-RX-Timing stören.
+      // Während TLS übernehmen die internen Timeouts die Absicherung.
+      secondTick.detach();
+
       catchCurrencies();
       // Retry nach 30s bei Fehler (fxValue[0]=CHF muss > 0 sein)
       if (fxValue[0] <= 0.0) {
@@ -266,6 +270,10 @@ void loop() {
         delay(30000);
         catchCurrencies();
       }
+
+      // Ticker wieder starten und Watchdog füttern
+      secondTick.attach(1, ISRwatchDog);
+      watchDogFeed();
       if (DEBUG) Serial.println(F("Kurse aktualisiert"));
     }
 
