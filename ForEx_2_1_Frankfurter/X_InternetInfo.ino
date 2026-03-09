@@ -24,6 +24,11 @@
 String sendAT(const String& cmd, int timeout);
 String sendATwait(const String& cmd, const String& waitFor, int timeout);
 
+// ESP8266 SDK – CPU-Frequenz umschalten (80 ↔ 160 MHz)
+extern "C" {
+  #include "user_interface.h"
+}
+
 // ============================================================
 // LTEClient – Arduino-Client-Adapter für BK-7670 (SIMCom A7670E)
 //
@@ -104,7 +109,7 @@ public:
     snprintf(cmd, sizeof(cmd), "AT+CIPSEND=0,%d", toSend);
 
     // AT-Befehl senden, auf ">" Prompt warten
-    delay(30);
+    delay(10);  // 10ms reicht – Modul verarbeitet CIPSEND schnell
     while (lteSerial.available()) lteSerial.read();
     lteSerial.println(cmd);
 
@@ -152,9 +157,11 @@ public:
   int available() override {
     if (_rxPos < _rxLen) return _rxLen - _rxPos;
 
-    // Modul nicht öfter als alle 50 ms abfragen (BearSSL pollt intensiv)
+    // Modul nicht öfter als alle 20 ms abfragen (BearSSL pollt intensiv).
+    // 20ms statt 50ms: schnellere Handshake-Antwortzeiten, bei 19200 Baud
+    // ist eine AT-Antwort (~30 Bytes) in ~15ms komplett übertragen.
     unsigned long now = millis();
-    if (now - _lastPoll < 50) return 0;
+    if (now - _lastPoll < 20) return 0;
     _lastPoll = now;
 
     // Modul nach gepufferten Bytes fragen – statischer Puffer
@@ -239,7 +246,7 @@ private:
   // Für die Hot-Path-Methoden (available/read/write) während BearSSL.
   void _sendATraw(const __FlashStringHelper* cmd, unsigned long timeout) {
     int len = 0;
-    delay(30);
+    delay(10);  // 10ms reicht für einfache AT-Queries (statt 30ms)
     while (lteSerial.available()) lteSerial.read();
     lteSerial.println(cmd);
 
@@ -269,7 +276,7 @@ private:
     char cmd[32];
     snprintf(cmd, sizeof(cmd), "AT+CIPRXGET=2,0,%d", toRead);
 
-    delay(30);
+    delay(10);  // 10ms reicht für CIPRXGET=2 (statt 30ms)
     while (lteSerial.available()) lteSerial.read();
     lteSerial.println(cmd);
 
@@ -313,8 +320,8 @@ private:
       yield();
     }
 
-    // Trailing \r\nOK\r\n konsumieren
-    delay(50);
+    // Trailing \r\nOK\r\n konsumieren (6 Bytes ≈ 3ms bei 19200 Baud)
+    delay(20);
     while (lteSerial.available()) lteSerial.read();
   }
 };
@@ -343,12 +350,17 @@ void catchCurrencies() {
   // Watchdog-Zähler zurücksetzen (180s Timeout reicht für TLS)
   watchDogCount = 0;
 
+  // CPU auf 160 MHz hochschalten – halbiert BearSSL-Crypto-Dauer.
+  // Weniger CPU-Zeit in Bignum-Loops = weniger SoftwareSerial-ISR-Störungen.
+  system_update_cpu_freq(160);
+
   // Heap-Guard: BearSSL braucht ~15-20 KB für TLS-Handshake
   if (ESP.getFreeHeap() < 15000) {
     if (DEBUG) Serial.println(F("ABBRUCH: Heap zu niedrig fuer TLS!"));
     tft.setTextColor(ST7735_YELLOW);
     tft.println("Heap zu niedrig");
     tft.setTextColor(ST7735_WHITE);
+    system_update_cpu_freq(80);
     return;
   }
 
@@ -369,6 +381,7 @@ void catchCurrencies() {
     tft.println("TCP Fehler");
     tft.setTextColor(ST7735_WHITE);
     lteClient.stop();
+    system_update_cpu_freq(80);
     return;
   }
   if (DEBUG) Serial.println(F("TCP OK, starte TLS..."));
@@ -388,11 +401,17 @@ void catchCurrencies() {
   }
 
   if (!sslClient.connect(httpHost, 443)) {
-    if (DEBUG) Serial.println(F("TLS-Handshake fehlgeschlagen"));
+    if (DEBUG) {
+      Serial.println(F("TLS-Handshake fehlgeschlagen"));
+      Serial.print(F("Heap nach TLS-Fehler: "));
+      Serial.println(ESP.getFreeHeap());
+    }
     tft.setTextColor(ST7735_YELLOW);
     tft.println("TLS Fehler");
     tft.setTextColor(ST7735_WHITE);
     sslClient.stop();
+    lteClient.stop();  // Auch TCP sauber schliessen (Modul-State aufräumen)
+    system_update_cpu_freq(80);
     return;
   }
   if (DEBUG) {
@@ -510,6 +529,9 @@ void catchCurrencies() {
       Serial.print(" = "); Serial.println(fxValue[l]);
     }
   }
+
+  // CPU zurück auf 80 MHz (Stromsparen im Normalbetrieb)
+  system_update_cpu_freq(80);
 
   if (DEBUG) Serial.println(F("=== catchCurrencies Ende ==="));
 }

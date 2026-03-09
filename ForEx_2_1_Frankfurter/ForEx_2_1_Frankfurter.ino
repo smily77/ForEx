@@ -7,6 +7,7 @@
 //   - Wechselkurse täglich um 17:00 Uhr (statt Mitternacht)
 //   - Provider-APN als einstell­bare Konstante
 
+#include <ESP8266WiFi.h>        // Nur für WiFi.mode(WIFI_OFF) – spart ~20 KB Heap
 #include <TimeLib.h>
 #include <SoftwareSerial.h>
 #include <SPI.h>
@@ -145,6 +146,12 @@ void watchDogAction() {
 // SETUP
 // ============================================================
 void setup() {
+  // WiFi-Firmware komplett deaktivieren (wird nicht gebraucht – LTE statt WiFi).
+  // Spart ~20 KB Heap und eliminiert WiFi-ISRs die SoftwareSerial stören.
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();
+  delay(1);  // forceSleep braucht 1 Zyklus
+
   if (DEBUG) Serial.begin(9600);
 
   pinMode(ledPin, OUTPUT);
