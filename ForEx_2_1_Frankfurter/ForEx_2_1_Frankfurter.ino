@@ -7,6 +7,7 @@
 //   - Wechselkurse täglich um 17:00 Uhr (statt Mitternacht)
 //   - Provider-APN als einstell­bare Konstante
 
+#include <ESP8266WiFi.h>        // Nur für WiFi.mode(WIFI_OFF) – spart ~20 KB Heap
 #include <TimeLib.h>
 #include <SoftwareSerial.h>
 #include <SPI.h>
@@ -145,6 +146,12 @@ void watchDogAction() {
 // SETUP
 // ============================================================
 void setup() {
+  // WiFi-Firmware komplett deaktivieren (wird nicht gebraucht – LTE statt WiFi).
+  // Spart ~20 KB Heap und eliminiert WiFi-ISRs die SoftwareSerial stören.
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();
+  delay(1);  // forceSleep braucht 1 Zyklus
+
   if (DEBUG) Serial.begin(9600);
 
   pinMode(ledPin, OUTPUT);
@@ -160,7 +167,7 @@ void setup() {
   tft.setCursor(0, 0);
 
   // LTE-Modul starten
-  lteSerial.begin(LTE_BAUD, SWSERIAL_8N1, LTE_RX_PIN, LTE_TX_PIN, false, 256); // 256-Byte ISR-Puffer
+  lteSerial.begin(LTE_BAUD, SWSERIAL_8N1, LTE_RX_PIN, LTE_TX_PIN, false, 512); // 512-Byte ISR-Puffer (grösser wegen BearSSL-Interrupt-Latenz)
   tft.println("ForEx v2.1-FR-SSL");
   tft.println("LTE Init...");
   tft.print("Provider: ");
@@ -259,6 +266,10 @@ void loop() {
     if ((hour() == 17) && (minuteLast == 0)) {
       if (DEBUG) Serial.println(F("17:00 – Tägliche Aktualisierung..."));
 #endif
+      // Ticker pausieren: Timer-ISR kann SoftwareSerial-RX-Timing stören.
+      // Während TLS übernehmen die internen Timeouts die Absicherung.
+      secondTick.detach();
+
       catchCurrencies();
       // Retry nach 30s bei Fehler (fxValue[0]=CHF muss > 0 sein)
       if (fxValue[0] <= 0.0) {
@@ -266,6 +277,10 @@ void loop() {
         delay(30000);
         catchCurrencies();
       }
+
+      // Ticker wieder starten und Watchdog füttern
+      secondTick.attach(1, ISRwatchDog);
+      watchDogFeed();
       if (DEBUG) Serial.println(F("Kurse aktualisiert"));
     }
 
