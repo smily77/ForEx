@@ -19,8 +19,8 @@
 #include "AirportDatabase.h"
 #include "Credentials.h"      // SIM-PIN (nicht auf GitHub)
 
-#define DEBUG        true
-#define TIMINGDEBUG  true   // true = Kursabruf alle 30 Min (Test); false = täglich 17:00
+#define DEBUG        false
+#define TIMINGDEBUG  false   // true = Kursabruf alle 30 Min (Test); false = täglich 17:00
 
 // ============================================================
 // KONFIGURATION: Airport-Codes für Weltuhren
@@ -77,7 +77,14 @@ SoftwareSerial lteSerial(LTE_RX_PIN, LTE_TX_PIN);
 #define ledPin        0
 
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST);
-
+// ============================================
+// HELLIGKEITSSTEUERUNG
+// ============================================
+#define LDR_HELL   400   // A0-Wert bei hellem Licht
+#define LDR_DUNKEL 1023  // A0-Wert bei Dunkelheit
+#define PWM_HELL   0     // PWM fuer hellstes Display
+#define PWM_DUNKEL 253   // PWM fuer dunklestes Display (gerade noch sichtbar)
+// ============================================
 // ============================================================
 // ZEITZONEN (aus Airport-Codes befüllt)
 // ============================================================
@@ -274,9 +281,16 @@ void loop() {
 
   // Helligkeit über Potentiometer / LDR an A0 anpassen (im Debug-Modus deaktiviert)
   if (!DEBUG) {
-    helligkeit = analogRead(A0);
-    if (helligkeit > 1010) helligkeit = 1010;
-    analogWrite(ledPin, helligkeit);
+    int ldrVal = analogRead(A0);
+    int pwm;
+    if (ldrVal <= LDR_HELL) {
+      pwm = PWM_HELL;
+    } else if (ldrVal >= LDR_DUNKEL) {
+      pwm = PWM_DUNKEL;
+    } else {
+      pwm = map(ldrVal, LDR_HELL, LDR_DUNKEL, PWM_HELL, PWM_DUNKEL);
+    }
+    analogWrite(ledPin, pwm);
   }
 
   yield();
