@@ -21,7 +21,7 @@
 #include "Credentials.h"      // SIM-PIN (nicht auf GitHub)
 
 #define DEBUG        false
-#define TIMINGDEBUG  true   // true = Kursabruf alle 30 Min (Test); false = täglich 17:00
+#define TIMINGDEBUG  false   // true = Kursabruf alle 30 Min (Test); false = täglich 17:00
 
 // ============================================================
 // KONFIGURATION: Airport-Codes für Weltuhren
