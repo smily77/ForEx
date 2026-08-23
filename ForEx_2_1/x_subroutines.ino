@@ -55,6 +55,38 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout = 5000) 
 }
 
 // ============================================================
+// Dauerhaft anhalten und Grund anzeigen.
+//
+// Wird nur bei SIM-PIN-Problemen verwendet. Ein Neustart wäre hier
+// gefährlich: bei jedem Boot würde erneut eine PIN gesendet, und nach
+// drei Fehlversuchen ist die SIM gesperrt und nur noch mit der PUK zu
+// entsperren. Lieber stehenbleiben und den Grund anzeigen.
+// ============================================================
+void haltWithMessage(const __FlashStringHelper* line1,
+                     const __FlashStringHelper* line2) {
+  Serial.print(F("[HALT] "));
+  Serial.println(line1);
+  Serial.println(F("Geraet angehalten - kein automatischer Neustart."));
+  Serial.flush();
+  clearTFTScreen();
+  tft.setTextColor(ST7735_RED);
+  tft.setTextSize(1);
+  tft.println(line1);
+  tft.println(line2);
+  tft.setTextColor(ST7735_WHITE);
+  tft.println();
+  tft.println("Geraet angehalten.");
+  tft.println("Kein Auto-Neustart -");
+  tft.println("sonst wird ein weiterer");
+  tft.println("PIN-Versuch verbraucht.");
+  while (true) {
+    ESP.wdtFeed();
+    delay(1000);
+    yield();
+  }
+}
+
+// ============================================================
 // BK-7670 MODUL INITIALISIEREN
 // ============================================================
 bool initLTE() {
@@ -63,49 +95,115 @@ bool initLTE() {
   // Warten bis Modul hochgefahren ist
   delay(3000);
 
-  // Basis-Kommunikationstest
-  String resp = sendAT("AT", 2000);
-  if (resp.indexOf("OK") == -1) {
-    delay(2000);
-    resp = sendAT("AT", 2000);
-    if (resp.indexOf("OK") == -1) {
-      if (DEBUG) Serial.println("FEHLER: Kein Modulkontakt");
-      return false;
-    }
+  // Basis-Kommunikationstest – bis zu ~30 s geduldig.
+  // Ein Mobilfunkmodul braucht nach dem Einschalten deutlich länger als der
+  // ESP8266, bis es auf AT antwortet. Früher gab es nur zwei Versuche über
+  // ~6 s. Beim KALTSTART (Netzteil einstecken) reicht das nicht; beim
+  // Warmstart (nur ESP-Reset über DTR) fällt es nicht auf, weil das Modul
+  // durchläuft und längst bereit ist.
+  String resp;
+  bool modemUp = false;
+  for (int i = 0; i < 15; i++) {
+    resp = sendAT("AT", 1000);
+    if (resp.indexOf("OK") != -1) { modemUp = true; break; }
+    ESP.wdtFeed();
+    delay(1000);
+    if ((i % 3) == 0) tft.print(".");
   }
+  if (!modemUp) {
+    Serial.println(F("[FEHLER] Kein Kontakt zum LTE-Modul (AT ohne Antwort)"));
+    tft.setTextColor(ST7735_RED);
+    tft.println("Kein Modulkontakt!");
+    tft.setTextColor(ST7735_WHITE);
+    return false;
+  }
+  Serial.println(F("[OK] LTE-Modul antwortet"));
 
   sendAT("ATE0", 500);          // Echo ausschalten
   sendAT("AT+CMEE=2", 500);     // Detaillierte Fehlermeldungen
 
-  // SIM-Karte prüfen / PIN eingeben (nur Provider 0)
-  resp = sendAT("AT+CPIN?", 2000);
-  if (resp.indexOf("READY") == -1) {
-#if ACTIVE_PROVIDER == 0
-    if (resp.indexOf("SIM PIN") != -1 && strlen(GPSII_PIN) > 0) {
-      tft.println("SIM PIN...");
-      if (DEBUG) Serial.println("SIM PIN eingeben...");
-      String pinCmd = String(F("AT+CPIN=\"")) + GPSII_PIN + "\"";
-      String pinResp = sendAT(pinCmd, 5000);
-      if (pinResp.indexOf("OK") == -1) {
-        if (DEBUG) Serial.println("FEHLER: PIN falsch!");
-        tft.setTextColor(ST7735_RED);
-        tft.println("PIN FALSCH!");
-        tft.setTextColor(ST7735_WHITE);
-        return false;
-      }
-      delay(3000);  // Warten bis SIM entsperrt
-      resp = sendAT("AT+CPIN?", 2000);
-    }
-#endif
-    if (resp.indexOf("READY") == -1) {
-      Serial.print(F("[FEHLER] SIM nicht bereit, CPIN-Antwort: "));
-      Serial.println(resp);
-      tft.setTextColor(ST7735_RED);
-      tft.println("SIM nicht bereit!");
-      tft.setTextColor(ST7735_WHITE);
-      delay(3000);
-    }
+  // Auf SIM-Bereitschaft warten (bis ~25 s) statt einmalig abzufragen.
+  // Direkt nach dem Einschalten meldet das Modul je nach Zustand
+  // "+CPIN: NOT READY" oder "+CME ERROR: SIM not inserted", obwohl die
+  // Karte wenige Sekunden später problemlos lesbar ist.
+  tft.print("SIM");
+  bool simReady   = false;
+  bool needPin    = false;
+  bool simBlocked = false;
+  for (int i = 0; i < 20; i++) {
+    resp = sendAT("AT+CPIN?", 2000);
+    if (resp.indexOf("READY")   != -1) { simReady   = true; break; }
+    if (resp.indexOf("SIM PUK") != -1) { simBlocked = true; break; }
+    if (resp.indexOf("SIM PIN") != -1) { needPin    = true; break; }
+    ESP.wdtFeed();
+    delay(1000);
+    if ((i % 4) == 0) tft.print(".");
   }
+  tft.println();
+
+  // SIM bereits gesperrt – hier hilft nur noch die PUK, von Hand.
+  if (simBlocked) {
+    haltWithMessage(F("SIM GESPERRT (PUK)"),
+                    F("Karte im Handy mit PUK entsperren."));
+  }
+
+  // PIN eingeben, falls die SIM danach verlangt.
+  // Nicht mehr an ACTIVE_PROVIDER gekoppelt – die PIN gehört zur SIM,
+  // nicht zum Mobilfunkanbieter.
+  if (needPin) {
+    if (strlen(GPSII_PIN) == 0) {
+      haltWithMessage(F("SIM braucht PIN!"),
+                      F("GPSII_PIN in Credentials.h setzen."));
+    }
+    tft.println("SIM PIN...");
+    Serial.println(F("SIM verlangt PIN - wird gesendet"));
+    // PIN NICHT über sendAT() senden, sonst steht sie im Klartext im Log
+    delay(30);
+    while (lteSerial.available()) lteSerial.read();
+    lteSerial.print(F("AT+CPIN=\""));
+    lteSerial.print(GPSII_PIN);
+    lteSerial.println("\"");
+    String pinResp;
+    pinResp.reserve(64);
+    unsigned long tPin = millis();
+    while (millis() - tPin < 5000) {
+      while (lteSerial.available()) pinResp += (char)lteSerial.read();
+      if (pinResp.indexOf("OK") != -1 || pinResp.indexOf("ERROR") != -1) break;
+      ESP.wdtFeed();
+      yield();
+    }
+    if (pinResp.indexOf("OK") == -1) {
+      // NICHT neu starten! Jeder Neustart würde einen weiteren der drei
+      // Versuche verbrauchen und die SIM danach dauerhaft sperren.
+      haltWithMessage(F("PIN ABGELEHNT!"),
+                      F("PIN pruefen - nur 3 Versuche!"));
+    }
+    // Nach dem Entsperren erneut auf READY warten
+    for (int i = 0; i < 15; i++) {
+      delay(1000);
+      resp = sendAT("AT+CPIN?", 2000);
+      if (resp.indexOf("READY") != -1) { simReady = true; break; }
+      ESP.wdtFeed();
+    }
+    if (simReady) Serial.println(F("[OK] SIM mit PIN entsperrt"));
+  }
+
+  if (!simReady) {
+    // Grund auch aufs Display bringen – der serielle Port hängt im
+    // Normalbetrieb nicht am Rechner.
+    resp.replace("\r", " ");
+    resp.replace("\n", " ");
+    resp.trim();
+    Serial.print(F("[FEHLER] SIM nicht bereit. Letzte CPIN-Antwort: "));
+    Serial.println(resp);
+    tft.setTextColor(ST7735_RED);
+    tft.println("SIM nicht bereit!");
+    tft.setTextColor(ST7735_WHITE);
+    tft.println(resp.substring(0, 60));
+    delay(5000);
+    return false;
+  }
+  Serial.println(F("[OK] SIM bereit"));
 
   // Auf Netzwerk-Registrierung warten (max. 60 Sekunden)
   if (DEBUG) Serial.println("Warte auf Netz-Registrierung...");

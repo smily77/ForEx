@@ -207,9 +207,32 @@ Ideal für PrePaid-SIM mit minimem Datenvolumen.
 | `Ticker` | ISR-basierter Watchdog-Timer |
 | `ESP8266WiFi` | nur um den WiFi-Stack abzuschalten (Core-Bestandteil) |
 
-Ausserdem nötig: eine Datei `Credentials.h` im Sketch-Ordner (steht in
-`.gitignore`). Vorlage: `Credentials.h.example`. Bei einer SIM ohne
-PIN-Abfrage genügt `#define GPSII_PIN ""`.
+### Credentials.h
+
+Der Sketch bindet `Credentials.h` ein, die `GPSII_PIN` (die PIN der
+SIM-Karte) definiert. Diese Datei liegt bewusst **nicht** im Sketch-Ordner,
+sondern im Arduino-Bibliotheksverzeichnis, damit sie ausserhalb des Repos
+bleibt und von mehreren Sketches geteilt werden kann:
+
+```
+Dokumente\Arduino\libraries\MyLGFXConfigs\Credentials.h
+```
+
+```cpp
+const char* GPSII_PIN = "1234";   // "" = SIM ohne PIN-Abfrage
+```
+
+> **Wichtig – keine `Credentials.h` im Sketch-Ordner anlegen!**
+> `#include "Credentials.h"` durchsucht zuerst das Sketch-Verzeichnis.
+> Eine Datei gleichen Namens dort verdeckt die echte lautlos, und der
+> Sketch wird mit den falschen Werten gebaut. `.gitignore` enthält
+> `Credentials.h` nur noch als Sicherheitsnetz.
+
+Ob der Build die richtige Datei nimmt, zeigt `arduino-cli compile -v`:
+
+```
+Alternativen für Credentials.h: [MyLGFXConfigs@1.0.0]
+```
 
 Board: **ESP8266** (Arduino Board Manager → `esp8266 by ESP8266 Community`)
 
@@ -281,4 +304,7 @@ stürzt manchmal ab»:
 | Retry nach Fehlversuch griff nie | Die Bedingung prüfte `fxValue[0]`, das nach dem ersten Erfolg dauerhaft gültig blieb | `catchCurrencies()` liefert jetzt `bool` |
 | Watchdog-Reset während des Kursabrufs | Der 180-s-Ticker lief während eines Abrufs weiter, der inkl. Retry länger dauern kann | Ticker während des Abrufs pausiert |
 | Helligkeit im Debug-Modus tot | Regelung war an `if (!DEBUG)` gekoppelt | entkoppelt, zusätzlich auf 200 ms gedrosselt |
-| Projekt nicht baubar | `Credentials.h` fehlte, mehrere Bibliotheken nicht installiert | `Credentials.h.example` ergänzt, Bibliotheken installiert |
+| Projekt nicht baubar | Mehrere Bibliotheken waren nicht installiert (Adafruit GFX, ST7735, Time) | über `arduino-cli lib install` ergänzt |
+| SIM-Init scheiterte beim Kaltstart | `AT` wurde nur 2x über ~6 s versucht, `AT+CPIN?` genau einmal abgefragt. Beim Warmstart (nur ESP-Reset) fiel das nie auf, weil das Modul durchlief | auf Modul (bis 30 s) und SIM (bis 25 s) wird jetzt gewartet |
+| PIN-Eingabe nur bei Provider 0 | Eingabe war in `#if ACTIVE_PROVIDER == 0` eingeschlossen – die PIN gehört aber zur SIM, nicht zum Anbieter | Bedingung entfernt |
+| Risiko SIM-Sperre | Bei abgelehnter PIN startete das Gerät neu und sendete die PIN erneut – nach drei Versuchen ist die SIM PUK-gesperrt | `haltWithMessage()`: bei abgelehnter PIN oder `SIM PUK` hält das Gerät dauerhaft an |
