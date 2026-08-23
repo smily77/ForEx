@@ -98,7 +98,8 @@ bool initLTE() {
     }
 #endif
     if (resp.indexOf("READY") == -1) {
-      if (DEBUG) Serial.println("FEHLER: SIM nicht bereit");
+      Serial.print(F("[FEHLER] SIM nicht bereit, CPIN-Antwort: "));
+      Serial.println(resp);
       tft.setTextColor(ST7735_RED);
       tft.println("SIM nicht bereit!");
       tft.setTextColor(ST7735_WHITE);
@@ -117,14 +118,14 @@ bool initLTE() {
     if (resp.indexOf(",1") != -1 || resp.indexOf(",5") != -1) {
       registered = true;
       tft.println("Netz OK.");
-      if (DEBUG) Serial.println("Netz-Registrierung OK");
+      Serial.printf("[OK] Netz-Registrierung nach %d s\n", i);
       break;
     }
     delay(1000);
     if ((i % 10) == 0) tft.print(".");
   }
   if (!registered) {
-    if (DEBUG) Serial.println("FEHLER: Kein Netz");
+    Serial.println(F("[FEHLER] Keine Netz-Registrierung nach 60 s"));
     tft.setTextColor(ST7735_RED);
     tft.println("KEIN NETZ!");
     tft.setTextColor(ST7735_WHITE);
@@ -148,11 +149,14 @@ bool initLTE() {
 
   // PDP-Kontext aktivieren
   resp = sendAT("AT+CGACT=1,1", 10000);
-  if (DEBUG) Serial.println("PDP-Aktivierung: " + resp);
+  if (resp.indexOf("OK") == -1) {
+    Serial.print(F("[WARN] PDP-Aktivierung nicht OK: ")); Serial.println(resp);
+  }
 
   // Operator-Info anzeigen
   resp = sendAT("AT+COPS?", 2000);
-  if (DEBUG) Serial.println("Operator: " + resp);
+  resp.replace("\r", " "); resp.replace("\n", " ");
+  Serial.print(F("Operator: ")); Serial.println(resp);
 
   if (DEBUG) Serial.println("=== LTE Init OK ===");
   return true;

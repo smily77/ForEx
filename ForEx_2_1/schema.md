@@ -54,7 +54,7 @@ graph TD
     G0   --> LEDIN
     A0   --> POTOUT
 
-    LTE  -->|LTE / Mobilfunk| INET["Internet\nfrankfurter.app API"]
+    LTE  -->|LTE / Mobilfunk| INET["Internet\nexchangerate-api.com"]
     LTE  -->|GSM-Signalisierung\nNITZ – kein Datenvolumen| TIME["Netzzeit\nvom Operator"]
 ```
 
@@ -105,9 +105,9 @@ flowchart TD
     NITZ --> TZ[Zeitzonen laden\nAirportDatabase.h]
     TZ --> GSMTIME[Zeit vom Operator lesen\nAT+CCLK?\nkein Datenvolumen]
     GSMTIME --> SETTIME[setTime – ZRH-Lokalzeit]
-    SETTIME --> FX[Wechselkurse abrufen\nHTTP via LTE\nfrankfurter.app]
+    SETTIME --> FX[Wechselkurse abrufen\nHTTP via LTE\nexchangerate-api.com]
     FX --> DISP[Display rendern]
-    DISP --> WD[Watchdog starten\n60 s Timeout]
+    DISP --> WD[Watchdog starten\n180 s Timeout]
 
     WD --> LOOP([Hauptschleife])
     LOOP --> HELL[Helligkeit lesen A0\nPWM anpassen]
@@ -187,8 +187,8 @@ Die APN-Einstellung wird als Konstante in `ForEx_2_1.ino` gewählt:
 | Funktion                           | Methode                  | Datenvolumen |
 |------------------------------------|--------------------------|:------------:|
 | Zeit synchronisieren               | AT+CCLK? (NITZ/GSM)     | **0 Byte**   |
-| Wechselkurse abrufen               | HTTP GET frankfurter.app | ~300 Byte    |
-| **Gesamt pro Tag**                 |                          | **~300 Byte** |
+| Wechselkurse abrufen               | HTTP GET exchangerate-api.com | ~2 500 Byte |
+| **Gesamt pro Tag**                 |                          | **~2 500 Byte** |
 
 Die Zeitabfrage über NITZ ist Teil der GSM-Signalisierung und verursacht
 **keinen Datenverbrauch** – ideal für PrePaid-SIM mit begrenztem Volumen.

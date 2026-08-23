@@ -19,16 +19,49 @@ String sendATwait(const String& cmd, const String& waitFor, int timeout);
 //   {"base":"EUR","date":"2025-03-05","time_last_updated":...,"rates":{
 //    ...,"CHF":0.9560,...,"GBP":0.8575,...,"USD":1.0853,...}}
 
-void catchCurrencies() {
+// ============================================================
+// Blockmarker aus der Modul-Antwort entfernen.
+//
+// Der BK-7670 liefert den HTTP-Body nicht am Stück, sondern in
+// 1024-Byte-Blöcken – und stellt jedem Block eine eigene Zeile
+// "+HTTPREAD: <n>" voran. Diese Zeilen landen MITTEN in den Nutzdaten:
+//
+//   ..."UGX":4290.09,"USD":1
+//   +HTTPREAD: 217
+//   .17,"UYU":46.78,...
+//
+// Dadurch wurde "USD":1.17 in "USD":1 und ".17" zerrissen; atof() las
+// 1.0 und der USD-Kurs war identisch mit dem EUR-Kurs. Vor dem Parsen
+// müssen die Marker samt zugehörigem Zeilenumbruch heraus, damit das
+// JSON wieder zusammenhängend ist.
+// ============================================================
+static void stripHttpReadMarkers(char* buf) {
+  char* src = buf;
+  char* dst = buf;
+  while (*src) {
+    if (strncmp(src, "+HTTPREAD:", 10) == 0) {
+      // Markerzeile bis einschliesslich Zeilenende überspringen
+      while (*src && *src != '\n') src++;
+      if (*src == '\n') src++;
+      // das direkt davor kopierte CR/LF wieder zurücknehmen,
+      // damit die beiden JSON-Hälften nahtlos aneinanderstossen
+      while (dst > buf && (dst[-1] == '\r' || dst[-1] == '\n')) dst--;
+      continue;
+    }
+    *dst++ = *src++;
+  }
+  *dst = '\0';
+}
+
+// Liefert true, wenn gültige Kurse gelesen und gesetzt wurden.
+bool catchCurrencies() {
   const char* httpHost = "api.exchangerate-api.com";
   const char* httpPath = "/v4/latest/EUR";
 
-  if (DEBUG) {
-    Serial.println("=== catchCurrencies ===");
-    Serial.print("URL: https://");
-    Serial.print(httpHost);
-    Serial.println(httpPath);
-  }
+  unsigned long fxStart = millis();
+  Serial.print(F("--- Kursabruf: https://"));
+  Serial.print(httpHost);
+  Serial.println(httpPath);
 
   // Watchdog läuft weiter (180s Timeout reicht für HTTP-Sequenz)
   watchDogCount = 0;
@@ -37,7 +70,10 @@ void catchCurrencies() {
 
   // Statischer Puffer statt String – verhindert Heap-Fragmentierungskrash
   // nach langem Betrieb. 'static' → liegt im BSS-Segment, nicht auf Stack/Heap.
-  static char body[2600];
+  // 3584 statt 2600 Bytes: die Antwort enthält ~160 Währungen (~2.5 KB) und
+  // "USD" steht weit hinten. Mit 2600 Bytes wurde die Antwort mitten in der
+  // USD-Zahl abgeschnitten – atof() lieferte dann 1.0 statt des echten Kurses.
+  static char body[3584];
   int bodyLen = 0;
   memset(body, 0, sizeof(body));
 
@@ -54,12 +90,12 @@ void catchCurrencies() {
 
   resp = sendAT("AT+HTTPINIT", 3000);
   if (resp.indexOf("OK") == -1) {
-    if (DEBUG) Serial.println("HTTPINIT fehlgeschlagen: " + resp);
+    Serial.print(F("[FEHLER] HTTPINIT: ")); Serial.println(resp);
     tft.setTextColor(ST7735_YELLOW);
     tft.println("HTTP Init fehl");
     tft.setTextColor(ST7735_WHITE);
     sendAT("AT+HTTPTERM", 1000);
-    return;
+    return false;
   }
 
   // URL setzen – vollständigen AT-Befehl in char[] bauen und als EINE println()-
@@ -125,16 +161,22 @@ void catchCurrencies() {
       delay(100);
       yield();
     }
-    if (DEBUG) { Serial.print(F("HTTPACTION: ")); Serial.println(urcBuf); }
+    // URC immer protokollieren (enthält HTTP-Status und Länge)
+    Serial.print(F("HTTPACTION -> "));
+    for (int k = 0; k < urcLen; k++) {
+      char c = urcBuf[k];
+      Serial.print((c == '\r' || c == '\n') ? ' ' : c);
+    }
+    Serial.println();
 
     // HTTP 200 prüfen
     if (!strstr(urcBuf, ",200,")) {
-      if (DEBUG) Serial.println(F("HTTP-Fehler oder Timeout"));
+      Serial.println(F("[FEHLER] HTTP-Status != 200 oder Timeout"));
       tft.setTextColor(ST7735_YELLOW);
       tft.println("HTTP Fehler");
       tft.setTextColor(ST7735_WHITE);
       sendAT("AT+HTTPTERM", 1000);
-      return;
+      return false;
     }
 
     // Länge aus ",200,<len>" extrahieren
@@ -154,33 +196,67 @@ void catchCurrencies() {
     lteSerial.println(httpLen);
     if (DEBUG) { Serial.print(F(">> AT+HTTPREAD=0,")); Serial.println(httpLen); }
 
-    unsigned long t0 = millis();
+    unsigned long t0        = millis();
+    unsigned long tLastByte = millis();
     bool httpReadSeen = false;
     int  httpReadPos  = 0;
 
     while (millis() - t0 < 30000) {
+      bool gotData = false;
       while (lteSerial.available() && bodyLen < (int)(sizeof(body) - 1)) {
         body[bodyLen++] = (char)lteSerial.read();
         body[bodyLen]   = '\0';
+        gotData = true;
       }
+      if (gotData) tLastByte = millis();
+
       if (!httpReadSeen) {
         char* p = strstr(body, "+HTTPREAD:");
         if (p) { httpReadSeen = true; httpReadPos = (int)(p - body); }
       }
+      // Reguläres Ende: "+HTTPREAD: 0" ist der Abschlussmarker des Moduls
+      // (nach dem letzten Datenblock). Das ist die schnellste und
+      // eindeutigste Abbruchbedingung.
+      if (strstr(body, "+HTTPREAD: 0\r")) break;
       if (httpReadSeen && strstr(body + httpReadPos, "OK\r")) break;
       if (strstr(body, "ERROR")) break;
-      yield();
+
+      // Notausstieg bei Chunked-Antwort: api.exchangerate-api.com antwortet
+      // mit "Transfer-Encoding: chunked". AT+HTTPACTION meldet dann
+      // "+HTTPACTION: 0,200,chunk" – also KEINE Byte-Länge. Wir müssen
+      // AT+HTTPREAD deshalb mit der Puffergrösse aufrufen, worauf das Modul
+      // auf Daten wartet, die nie kommen, und das abschliessende OK ausbleibt.
+      // Ohne diesen Abbruch lief jeder Kursabruf volle 30 s ins Timeout.
+      if (bodyLen > 64 && millis() - tLastByte > 2000) break;
+
+      // Hardware-Watchdog (8 s) füttern. Fehlte hier bisher komplett –
+      // deshalb gab es mitten im Lesen einen "rst cause:4 / wdt reset".
+      ESP.wdtFeed();
+      delay(1);   // echte Rückgabe an den SDK-Task
     }
     if (DEBUG) { Serial.println(F("HTTP Body:")); Serial.println(body); }
+    Serial.print(F("Body: ")); Serial.print(bodyLen); Serial.println(F(" Bytes"));
   }
 
   // HTTP-Stack beenden
   sendAT("AT+HTTPTERM", 1000);
 
   if (bodyLen < 10) {
-    if (DEBUG) Serial.println(F("Leere Antwort – Abbruch"));
-    return;
+    Serial.println(F("[FEHLER] Leere Antwort – Abbruch"));
+    return false;
   }
+
+  // Blockmarker entfernen – sonst zerreisst "+HTTPREAD: <n>" Zahlenwerte
+  stripHttpReadMarkers(body);
+
+  // Ab der ersten geschweiften Klammer parsen (davor steht noch das
+  // "OK" der AT-Quittung)
+  char* json = strchr(body, '{');
+  if (json == NULL) {
+    Serial.println(F("[FEHLER] Kein JSON in der Antwort"));
+    return false;
+  }
+  if (DEBUG) { Serial.println(F("JSON bereinigt:")); Serial.println(json); }
 
   // -------------------------------------------------------
   // JSON parsen mit strstr/atof – kein String-Objekt nötig.
@@ -193,7 +269,7 @@ void catchCurrencies() {
       // Suchschlüssel z.B. "\"CHF\":"
       char key[10];
       snprintf(key, sizeof(key), "\"%s\":", fxSym[i].c_str());
-      char* p = strstr(body, key);
+      char* p = strstr(json, key);
       if (p) {
         p += strlen(key);
         fxValue[i] = atof(p);
@@ -227,5 +303,13 @@ void catchCurrencies() {
     }
   }
 
-  if (DEBUG) Serial.println("=== catchCurrencies Ende ===");
+  // Plausibilitätsprüfung: alle drei Kurse müssen > 0 sein. Sonst hat das
+  // Parsen etwas nicht gefunden und der Aufrufer soll erneut versuchen.
+  bool ok = (fxValue[1] > 0.0 && fxValue[2] > 0.0 && fxValue[3] > 0.0);
+
+  // Ergebnis immer protokollieren – macht spätere Fehlersuche möglich
+  Serial.printf("[%s] Kurse nach %lu ms: CHF/USD %.4f  CHF/EUR %.4f  CHF/GBP %.4f\n",
+                ok ? "OK" : "FEHLER", millis() - fxStart,
+                fxValue[1], fxValue[2], fxValue[3]);
+  return ok;
 }

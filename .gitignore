@@ -159,3 +159,6 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# Flash-Backups (lokal, nicht versionieren)
+_backup/

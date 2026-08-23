@@ -55,9 +55,12 @@ ForEx_2_1/
 In `ForEx_2_1.ino`:
 
 ```cpp
-#define ACTIVE_PROVIDER  1   // 0 = M-Budget Mobile (Swisscom)
+#define ACTIVE_PROVIDER  0   // 0 = M-Budget Mobile (Swisscom)
                              // 1 = Digital Republic (Salt)
 ```
+
+> Aktuell eingestellt: **0** (M-Budget Mobile, APN `gprs.swisscom.ch`).
+> Im Betrieb bestätigt: `+COPS: 0,2,"22801",7` – MCC/MNC 228-01 (Swisscom), LTE.
 
 | Wert | Provider | Netz | APN |
 |:----:|----------|------|-----|
@@ -101,10 +104,13 @@ Index 0 ist immer die Heimatzone (ZRH). Die übrigen sechs können frei aus `Air
 
 ### Hauptschleife
 
-- Jede Minute: Display neu rendern
-- Täglich um **17:00 Uhr**: Zeit re-synchronisieren + neue Kurse laden
-- A0-Analogwert → PWM-Helligkeit (im DEBUG-Modus deaktiviert)
-- Watchdog: 60 s Timeout → `ESP.reset()`
+- Jede Minute: Display neu rendern + Statuszeile auf den seriellen Port
+- Alle 6 Stunden (zur vollen Stunde): Zeit re-synchronisieren (kostenlos)
+- Täglich um **17:00 Uhr**: neue Kurse laden
+- A0-Analogwert → PWM-Helligkeit, alle 200 ms, unabhängig von `DEBUG`
+- Unaufgeforderte Meldungen (URCs) des LTE-Moduls abholen und verwerfen
+- Watchdog: 180 s ohne Minutenwechsel → `ESP.restart()`
+  (während des Kursabrufs pausiert, da dieser länger dauern kann)
 
 ### Wechselkurs-Abfrage (`X_InternetInfo.ino`)
 
@@ -130,10 +136,21 @@ AT+HTTPTERM          → offene Session beenden
 AT+HTTPINIT          → HTTP-Stack starten
 AT+HTTPPARA="URL",…  → URL setzen (mit RX-ISR-Pause beim TX)
 AT+HTTPACTION=0      → GET-Request senden
-  warten auf: +HTTPACTION: 0,200,<len>
-AT+HTTPREAD=0,<len>  → Body lesen (in 1024-Byte-Chunks)
+  warten auf: +HTTPACTION: 0,200,chunk
+AT+HTTPREAD=0,<max>  → Body lesen (in 1024-Byte-Blöcken)
 AT+HTTPTERM          → Session beenden
 ```
+
+> **Achtung – zwei Eigenheiten des Moduls:**
+>
+> 1. Die API antwortet mit `Transfer-Encoding: chunked`. `AT+HTTPACTION`
+>    meldet dann `0,200,chunk` statt einer Byte-Länge. `AT+HTTPREAD` muss
+>    deshalb mit der Puffergrösse aufgerufen werden; das Ende wird am
+>    Abschlussmarker `+HTTPREAD: 0` erkannt.
+> 2. Das Modul liefert den Body in 1024-Byte-Blöcken und stellt **jedem
+>    Block eine eigene Zeile `+HTTPREAD: <n>` voran** – mitten in den
+>    Nutzdaten. Diese Marker müssen vor dem Parsen entfernt werden
+>    (`stripHttpReadMarkers()`), sonst zerreissen sie Zahlenwerte.
 
 ### Zeitabfrage (kostenfrei)
 
@@ -188,15 +205,80 @@ Ideal für PrePaid-SIM mit minimem Datenvolumen.
 | `Adafruit_ST7735` | TFT-Treiber |
 | `Streaming` | Komfortabler Serial-Output |
 | `Ticker` | ISR-basierter Watchdog-Timer |
+| `ESP8266WiFi` | nur um den WiFi-Stack abzuschalten (Core-Bestandteil) |
+
+Ausserdem nötig: eine Datei `Credentials.h` im Sketch-Ordner (steht in
+`.gitignore`). Vorlage: `Credentials.h.example`. Bei einer SIM ohne
+PIN-Abfrage genügt `#define GPSII_PIN ""`.
 
 Board: **ESP8266** (Arduino Board Manager → `esp8266 by ESP8266 Community`)
 
 ---
 
-## Debug-Modus
+## Diagnose
 
-```cpp
-#define DEBUG true   // → false für Produktionsbetrieb
+Der serielle Port läuft **immer** mit **115200 Baud** – auch im
+Produktionsbetrieb. Boot-Grund, Init-Schritte, Kursabruf und ein
+Minutentakt werden grundsätzlich ausgegeben. Ohne diese Grundausgabe
+liess sich ein Fehlerfall am Gerät nicht nachvollziehen.
+
+Typischer Start (Sollzustand):
+
+```
+===== ForEx v2.1 =====
+Boot-Grund : External System
+Freier Heap: 46048
+Provider   : M-Budget Mobile
+APN        : gprs.swisscom.ch
+WiFi-Modus : 0
+[OK] Netz-Registrierung nach 0 s
+Operator:   +COPS: 0,2,"22801",7    OK
+[OK] LTE-Init abgeschlossen
+[OK] Zeit gesetzt: 22:52:06  23.08.2026
+[OK] Kurse nach 6321 ms: CHF/USD 0.8000  CHF/EUR 0.9360  CHF/GBP 1.0935
+[22:53] Heap 35264  A0 1024
 ```
 
-Mit `DEBUG true` gibt der Serial Monitor (9600 Baud) alle AT-Kommandos, Antworten, GSM-Zeit und berechnete Kurse aus. Im Produktionsbetrieb (`false`) wird ausserdem die Helligkeit über A0 geregelt.
+Danach je Minute eine Statuszeile. **`Heap` muss konstant bleiben** –
+ein stetig fallender Wert wäre ein Speicherleck.
+
+`Boot-Grund` ist der wichtigste Wert bei Problemen:
+
+| Wert | Bedeutung |
+|------|-----------|
+| `External System` | normaler Reset (Reset-Taste, Upload, DTR) |
+| `Power on` | Netzteil eingesteckt |
+| `Hardware Watchdog` | Code blockierte > 8 s ohne den WDT zu füttern |
+| `Software Watchdog` | Code blockierte > 3 s ohne `yield()` |
+| `Exception` | Absturz – die folgende Zeile enthält `epc1`/`ctx` |
+
+### Ausführliches AT-Protokoll
+
+```cpp
+#define DEBUG        true    // jedes AT-Kommando + jede Antwort
+#define TIMINGDEBUG  true    // Kursabruf alle N Minuten statt täglich 17:00
+#define TIMINGDEBUG_INTERVAL_MIN  3
+```
+
+`TIMINGDEBUG` ist zum Testen des Kursabrufs gedacht – damit muss man
+nicht bis 17:00 Uhr warten. **Beide vor dem Produktivbetrieb wieder auf
+`false` setzen** (`DEBUG true` erzeugt sehr viel Ausgabe).
+
+---
+
+## Behobene Fehler (Stand 2026-08-23)
+
+Diese Punkte verursachten das Verhalten «läuft mal, läuft mal nicht,
+stürzt manchmal ab»:
+
+| Problem | Ursache | Behebung |
+|---------|---------|----------|
+| Dauernde Neustarts, sporadische AT-Fehler | WiFi war nie abgeschaltet. Im Flash standen noch Zugangsdaten aus ForEx_1_1 (`NECpresenter`); der SDK versuchte endlos zu verbinden. Die WiFi-Interrupts zerstörten das Bit-Timing des SoftwareSerial (19200 Baud). | `WiFi.persistent(false)` + `disconnect(true)` + `mode(WIFI_OFF)` + `forceSleepBegin()` am Anfang von `setup()`; Flash einmalig komplett gelöscht |
+| `rst cause:4 / wdt reset` kurz nach jedem Kursabruf | Die URCs des LTE-Moduls wurden zwischen den Abrufen nie gelesen; der ISR-Puffer des SoftwareSerial lief voll und der RX-Interrupt blieb dauerhaft aktiv | `while (lteSerial.available()) lteSerial.read();` + `ESP.wdtFeed()` in `loop()` |
+| `rst cause:4` mitten im Lesen des Bodys | In der `AT+HTTPREAD`-Schleife fehlte `ESP.wdtFeed()` | ergänzt, zusätzlich `delay(1)` |
+| Kursabruf dauerte immer 35 s | Chunked-Antwort: das abschliessende `OK` kam nie, die Schleife lief stets ins 30-s-Timeout | Abbruch bei `+HTTPREAD: 0` bzw. nach 2 s ohne neue Bytes → jetzt ~6,5 s |
+| CHF/USD war identisch mit CHF/EUR | Der Blockmarker `+HTTPREAD: 217` stand mitten im Wert: `"USD":1` ⼁ `.17` → `atof()` las 1.0 | `stripHttpReadMarkers()` vor dem Parsen |
+| Retry nach Fehlversuch griff nie | Die Bedingung prüfte `fxValue[0]`, das nach dem ersten Erfolg dauerhaft gültig blieb | `catchCurrencies()` liefert jetzt `bool` |
+| Watchdog-Reset während des Kursabrufs | Der 180-s-Ticker lief während eines Abrufs weiter, der inkl. Retry länger dauern kann | Ticker während des Abrufs pausiert |
+| Helligkeit im Debug-Modus tot | Regelung war an `if (!DEBUG)` gekoppelt | entkoppelt, zusätzlich auf 200 ms gedrosselt |
+| Projekt nicht baubar | `Credentials.h` fehlte, mehrere Bibliotheken nicht installiert | `Credentials.h.example` ergänzt, Bibliotheken installiert |
