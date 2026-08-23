@@ -112,6 +112,16 @@ TimezoneInfo timezones[7];
 String fxSym[4]   = {"CHF", "USD", "EUR", "GBP"};
 float  fxValue[4];
 
+// Kursabruf-Zustand. Solange noch kein Abruf gelungen ist, wird in
+// grösseren Abständen nachgefasst, statt bis 17:00 Uhr mit 0.0000
+// dazustehen. Ein fehlgeschlagener AT+HTTPINIT kostet kein Datenvolumen;
+// erst der erfolgreiche Abruf überträgt ~7 KB. Die Zahl der Versuche ist
+// trotzdem begrenzt, weil die SIM nur wenige MB pro Monat frei hat.
+bool fxValid   = false;
+byte fxRetries = 0;
+#define FX_RETRY_INTERVAL_MIN  15
+#define FX_MAX_RETRIES          8
+
 // ============================================================
 // ZUSTANDSVARIABLEN
 // ============================================================
@@ -252,12 +262,19 @@ void setup() {
   // Wechselkurse per LTE abrufen (Datenvolumen)
   clearTFTScreen();
   tft.println("Kurse abrufen...");
-  if (!catchCurrencies()) {
-    // Ein Fehlversuch ist beim Kaltstart normal (Modul noch nicht ganz
-    // eingebucht) – einmal kurz warten und erneut versuchen.
-    Serial.println(F("[WARN] Erster Kursabruf fehlgeschlagen, Retry in 10 s"));
-    delay(10000);
-    catchCurrencies();
+  // Beim Kaltstart braucht das Modul manchmal länger, bis HTTP nutzbar ist –
+  // deshalb bis zu drei Versuche mit wachsendem Abstand.
+  for (int versuch = 1; versuch <= 3; versuch++) {
+    fxValid = catchCurrencies();
+    if (fxValid) break;
+    if (versuch < 3) {
+      Serial.printf("[WARN] Kursabruf %d/3 fehlgeschlagen, erneut in %d s\n",
+                    versuch, versuch * 15);
+      delay(versuch * 15000);
+    }
+  }
+  if (!fxValid) {
+    Serial.println(F("[WARN] Startabruf fehlgeschlagen - wird spaeter nachgeholt"));
   }
 
   firstRun = false;
@@ -295,6 +312,21 @@ void loop() {
       }
     }
 
+    // Nachholversuch, falls beim Start kein Kurs geladen werden konnte.
+    // Ohne das stünde das Display bis zum nächsten regulären Abruf
+    // (17:00 Uhr) mit 0.0000 da.
+    if (!fxValid && (minuteLast % FX_RETRY_INTERVAL_MIN) == 0
+                 && fxRetries < FX_MAX_RETRIES) {
+      fxRetries++;
+      Serial.printf("[INFO] Kurs-Nachholversuch %d/%d\n",
+                    fxRetries, FX_MAX_RETRIES);
+      secondTick.detach();
+      fxValid = catchCurrencies();
+      secondTick.attach(1, ISRwatchDog);
+      watchDogFeed();
+      if (fxValid) Serial.println(F("[OK] Kurse nachgeholt"));
+    }
+
     // Kursabruf: im TIMINGDEBUG-Modus alle TIMINGDEBUG_INTERVAL_MIN Minuten,
     // sonst täglich um 17:00
 #if TIMINGDEBUG
@@ -313,6 +345,7 @@ void loop() {
       // Erfolg am Rückgabewert festmachen, NICHT an fxValue[0]: das behält
       // nach dem ersten erfolgreichen Abruf dauerhaft einen gültigen Wert,
       // wodurch der Retry im laufenden Betrieb nie ausgelöst wurde.
+      fxRetries = 0;   // neuer Tag, neues Kontingent an Nachholversuchen
       bool fxOk = catchCurrencies();
       if (!fxOk) {
         Serial.println(F("[WARN] Kursabruf fehlgeschlagen, Retry in 30 s..."));
@@ -328,6 +361,7 @@ void loop() {
         }
       }
 
+      fxValid = fxOk;
       secondTick.attach(1, ISRwatchDog);
       watchDogFeed();
       Serial.println(fxOk ? F("[OK] Kursabruf beendet")

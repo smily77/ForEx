@@ -205,6 +205,20 @@ bool initLTE() {
   }
   Serial.println(F("[OK] SIM bereit"));
 
+  // PIN-Sperre der Karte abfragen – rein informativ, kostet kein
+  // Datenvolumen. Beantwortet die Frage, ob GPSII_PIN überhaupt gebraucht
+  // wird: "+CLCK: 1" = PIN-Abfrage auf der SIM aktiv, "+CLCK: 0" = aus.
+  // Der Status gehört zur Karte, nicht zur Sitzung – er ist also auch dann
+  // aussagekräftig, wenn die SIM bereits entsperrt ist.
+  {
+    String lck = sendAT("AT+CLCK=\"SC\",2", 3000);
+    lck.replace("\r", " ");
+    lck.replace("\n", " ");
+    lck.trim();
+    Serial.print(F("SIM PIN-Sperre: "));
+    Serial.println(lck);
+  }
+
   // Auf Netzwerk-Registrierung warten (max. 60 Sekunden)
   if (DEBUG) Serial.println("Warte auf Netz-Registrierung...");
   tft.println("Warte auf Netz...");
@@ -249,6 +263,35 @@ bool initLTE() {
   resp = sendAT("AT+CGACT=1,1", 10000);
   if (resp.indexOf("OK") == -1) {
     Serial.print(F("[WARN] PDP-Aktivierung nicht OK: ")); Serial.println(resp);
+  }
+
+  // Warten, bis der PDP-Kontext tatsächlich eine IP-Adresse hat.
+  // AT+CGACT quittiert zwar sofort mit OK, aber direkt nach dem KALTSTART
+  // ist die Datenverbindung noch nicht nutzbar: AT+HTTPINIT antwortet dann
+  // mit ERROR und der komplette Kursabruf scheitert. Beim Warmstart (nur
+  // ESP-Reset) fällt das nie auf, weil das Modul die Verbindung noch hält.
+  // Kostet kein Datenvolumen – AT+CGPADDR fragt nur den lokalen Zustand ab.
+  tft.print("Daten");
+  bool dataUp = false;
+  for (int i = 0; i < 20; i++) {
+    resp = sendAT("AT+CGPADDR=1", 3000);
+    if (resp.indexOf("+CGPADDR") != -1 &&
+        resp.indexOf("0.0.0.0")  == -1 &&
+        resp.indexOf(".")        != -1) { dataUp = true; break; }
+    ESP.wdtFeed();
+    delay(1000);
+    if ((i % 4) == 0) tft.print(".");
+  }
+  tft.println();
+  resp.replace("\r", " ");
+  resp.replace("\n", " ");
+  resp.trim();
+  if (dataUp) {
+    Serial.print(F("[OK] Datenverbindung: "));
+    Serial.println(resp);
+  } else {
+    Serial.print(F("[WARN] Keine IP nach 20 s, HTTP wird vermutlich scheitern: "));
+    Serial.println(resp);
   }
 
   // Operator-Info anzeigen

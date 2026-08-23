@@ -222,6 +222,10 @@ Dokumente\Arduino\libraries\MyLGFXConfigs\Credentials.h
 const char* GPSII_PIN = "1234";   // "" = SIM ohne PIN-Abfrage
 ```
 
+Die Zeile `SIM PIN-Sperre:` im Boot-Log zeigt, ob die PIN überhaupt
+gebraucht wird: `+CLCK: 1` = PIN-Abfrage auf der Karte aktiv,
+`+CLCK: 0` = deaktiviert. Der Status gehört zur Karte, nicht zur Sitzung.
+
 > **Wichtig – keine `Credentials.h` im Sketch-Ordner anlegen!**
 > `#include "Credentials.h"` durchsucht zuerst das Sketch-Verzeichnis.
 > Eine Datei gleichen Namens dort verdeckt die echte lautlos, und der
@@ -254,7 +258,10 @@ Freier Heap: 46048
 Provider   : M-Budget Mobile
 APN        : gprs.swisscom.ch
 WiFi-Modus : 0
+[OK] SIM bereit
+SIM PIN-Sperre: +CLCK: 1    OK
 [OK] Netz-Registrierung nach 0 s
+[OK] Datenverbindung: +CGPADDR: 1,10.37.16.125    OK
 Operator:   +COPS: 0,2,"22801",7    OK
 [OK] LTE-Init abgeschlossen
 [OK] Zeit gesetzt: 22:52:06  23.08.2026
@@ -307,4 +314,6 @@ stürzt manchmal ab»:
 | Projekt nicht baubar | Mehrere Bibliotheken waren nicht installiert (Adafruit GFX, ST7735, Time) | über `arduino-cli lib install` ergänzt |
 | SIM-Init scheiterte beim Kaltstart | `AT` wurde nur 2x über ~6 s versucht, `AT+CPIN?` genau einmal abgefragt. Beim Warmstart (nur ESP-Reset) fiel das nie auf, weil das Modul durchlief | auf Modul (bis 30 s) und SIM (bis 25 s) wird jetzt gewartet |
 | PIN-Eingabe nur bei Provider 0 | Eingabe war in `#if ACTIVE_PROVIDER == 0` eingeschlossen – die PIN gehört aber zur SIM, nicht zum Anbieter | Bedingung entfernt |
+| Kursabruf scheiterte nach echtem Kaltstart | `AT+CGACT` quittiert sofort mit `OK`, die Datenverbindung ist aber noch nicht nutzbar – `AT+HTTPINIT` antwortet dann mit `ERROR`. Beim Warmstart nie sichtbar, weil das Modul die Verbindung hält | wartet jetzt über `AT+CGPADDR=1` auf eine echte IP (bis 20 s) |
+| Display hätte bis 17:00 Uhr `0.0000` gezeigt | Der Startabruf hatte nur einen einzigen Retry; danach war der nächste Versuch erst am Folgetag | 3 Startversuche mit wachsendem Abstand, danach Nachholversuch alle 15 Min (max. 8), bis einer gelingt |
 | Risiko SIM-Sperre | Bei abgelehnter PIN startete das Gerät neu und sendete die PIN erneut – nach drei Versuchen ist die SIM PUK-gesperrt | `haltWithMessage()`: bei abgelehnter PIN oder `SIM PUK` hält das Gerät dauerhaft an |
